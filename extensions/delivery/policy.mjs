@@ -16,7 +16,7 @@ export function catalog(all, available) {
   return [...new Set(all.map(m=>`${m.provider}/${m.id}`))].sort().map(id=>({id,available:ids.has(id),evidence:'not tested'}));
 }
 export function validateRoutes(routes, available) {
-  for (const role of ROLES) check(text(routes?.[role],256) && available.includes(routes[role]), `Missing/unavailable exact model route: ${role}. Run /delivery setup.`);
+  for (const role of ROLES) check(text(routes?.[role],256) && available.includes(routes[role]), `Missing/unavailable exact model route: ${role}. Select an available exact model using delivery_configure, or configure its provider with /login. /delivery setup is the interactive alternative.`);
   return Object.fromEntries(ROLES.map(r=>[r,routes[r]]));
 }
 export function validatePlan(input) {
@@ -72,7 +72,7 @@ export function repairCheckScopes(state,taskChecks) {
   return s;
 }
 export function parentToolAllowed(name, input) {
-  if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_status','delivery_diff'].includes(name)) return true;
+  if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_status','delivery_diff','delivery_configure','delivery_steer'].includes(name)) return true;
   if (name==='subagent') return ['status','list','get','models','guide','doctor','children.list'].includes(input?.action);
   // Supervisor responses are handled by the user, not an LLM able to authorize scope changes.
   return name==='subagent_supervisor' && ['pending','list'].includes(input?.action);

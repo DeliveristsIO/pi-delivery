@@ -54,6 +54,8 @@ In a Git repository you trust, run:
 
 Pick an exact model for planning, coding, spec review, quality review and security review. Missing picks block execution — there is no silent fallback. Settings are stored in the agent directory's `delivery.json`, not in your repository.
 
+Setup is not a recovery step. After initial configuration, ask for a specific model change in conversation: the assistant uses `delivery_configure` to inspect available models and confirm only the requested route changes. Existing plans, partial work and evidence are preserved. A pending proposal is shown again with the new routes and waits for fresh execution approval. Running or unresolved workers must settle before routes change.
+
 ## Use
 
 Describe the task normally, or start with `/delivery Add …`. You approve the scope, workspace and checks before anything runs.
@@ -86,6 +88,10 @@ For review-only (no edits), ask something like: "review the last two commits."
 ```
 
 If a run gets stuck, check `/delivery status` first. Reviewers are never given write tools; security rejections cannot edit code. Do not loop on approval or reset session files.
+
+Status identifies the next action, the models bound to the retained plan, models configured for future plans, native worker evidence and recorded host checks. A closed failed attempt needs a corrective proposal from retained requirements; it does not require a new session or another setup. Calling resume on a running, completed or already-closed run returns guidance without launching a duplicate worker.
+
+An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
 
 Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command, at most 2 fix rounds per task. See [docs/configuration.md](docs/configuration.md).
 

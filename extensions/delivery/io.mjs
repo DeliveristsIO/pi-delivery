@@ -122,6 +122,24 @@ export function isSettled(active) {
   const t=jsonFile(path);
   return t.runId===active.id && t.state==='observed' && t.instances?.length>0;
 }
+// Missing files alone never prove that a writer has stopped. A host reboot does.
+export function hostBootTime() {
+  if(process.platform!=='linux')return null;
+  try {
+    const seconds=readFileSync('/proc/stat','utf8').match(/^btime (\d+)$/m)?.[1];
+    return seconds?Number(seconds)*1000:null;
+  } catch {return null;}
+}
+export function orphanedRunEvidence(active,bootedAt=hostBootTime()) {
+  if(!active?.id || !active.dir)return null;
+  try {lstatSync(join(active.dir,'status.json'));return null;}
+  catch(e){if(e.code!=='ENOENT')throw e;}
+  // Include a margin for the second-granularity boot timestamp. Do not infer
+  // closure for same-boot cleanup, missing timestamps or future clock values.
+  if(!Number.isFinite(bootedAt) || bootedAt<=0 || bootedAt>Date.now() ||
+    !Number.isFinite(active.startedAt) || active.startedAt<=0 || active.startedAt>=bootedAt-60000)return null;
+  return {kind:'host-reboot',bootedAt,startedAt:active.startedAt,missingPath:join(active.dir,'status.json')};
+}
 export function runProgress(active) {
   const s=jsonFile(join(active.dir,'status.json'));
   if(s.runId!==active.id)throw new Error('Run identity mismatch');

@@ -26,3 +26,12 @@ test('verification records actual command failure and timeout',async t=>{
  const d=dir(t);assert.equal((await verifyCommand(d,'exit 7')).code,7);
  const timeout=await verifyCommand(d,'sleep 5',undefined,20);assert.equal(timeout.terminated,true);assert.notEqual(timeout.code,0);
 });
+
+test('orphan evidence requires missing status and a worker started before this host boot',async t=>{
+ const {orphanedRunEvidence}=await import('../extensions/delivery/io.mjs');
+ const d=dir(t),bootedAt=Date.now()-100000,active={id:'run',dir:d,startedAt:bootedAt-120000};
+ assert.equal(orphanedRunEvidence(active,bootedAt).kind,'host-reboot');
+ for(const startedAt of [undefined,NaN,0,bootedAt-1000,bootedAt+1000])assert.equal(orphanedRunEvidence({...active,startedAt},bootedAt),null);
+ for(const boot of [null,NaN,0,Date.now()+100000])assert.equal(orphanedRunEvidence(active,boot),null);
+ writeFileSync(join(d,'status.json'),'malformed');assert.equal(orphanedRunEvidence(active,bootedAt),null);
+});

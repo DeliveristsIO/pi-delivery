@@ -35,3 +35,9 @@ An already running Pi process must reload the extension (or restart with `pi --c
 ## Planning questions
 
 The planning agent can ask focused questions in conversation before submitting a plan when requirements are unclear. It first checks repository context and prior decisions, then waits for answers to material questions. Answers inform the proposal; execution approval is requested after the resolved plan is shown. No special question command is needed.
+
+## Missing worker records after a reboot
+
+On Linux, delivery compares the retained worker start time with the current host boot time when its native `status.json` is missing. If a reboot proves the old worker cannot still be running, startup, `/delivery setup`, and `delivery_resume` retire that attempt without launching another worker. The plan, partial files, reviews and retry history remain intact. The reserved coding allowance is charged in full because the actual runtime cannot be verified. Setup can then change routes; further execution requires a corrective plan and its approval.
+
+Missing files by themselves do not establish closure. Same-boot cleanup, unknown start times, unsupported boot evidence and existing malformed status files remain unresolved; delivery does not release a potentially live writer. No successful result or passed check is inferred from a reboot.

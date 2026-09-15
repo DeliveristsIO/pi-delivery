@@ -26,7 +26,10 @@ test('parent cannot edit, shell, delegate directly or bypass via custom tools', 
   for (const name of ['bash','powershell','edit','write','interactive_shell','mcp','subagent']) assert.equal(parentToolAllowed(name, {}), false, name);
   assert.equal(parentToolAllowed('read', {}), true);
   assert.equal(parentToolAllowed('delivery_plan', {}), true);
+  assert.equal(parentToolAllowed('delivery_configure', {}), true);
+  assert.equal(parentToolAllowed('delivery_steer', {}), true);
   assert.equal(parentToolAllowed('subagent', {action:'status'}), true);
+  assert.equal(parentToolAllowed('subagent', {action:'steer'}), false);
   assert.equal(parentToolAllowed('subagent', {action:'create'}), false);
 });
 test('approval is bound to plan and routes; no approval means no work', () => {

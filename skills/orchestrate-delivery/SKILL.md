@@ -13,6 +13,8 @@ Read repository instructions and relevant project memory. Resolve genuine scope 
 
 If delivery tools are missing, request installation and a full Pi restart after workers settle. Do not pretend workers ran. `/delivery setup` selects exact routes and obtains provider-context consent. Never silently substitute models.
 
+Do not repeat setup as a recovery ritual. Inspect `delivery_configure` without arguments for configured routes and available exact IDs. For a user-requested route change, supply only the selected roles and exact model IDs to `delivery_configure`; it shows provider-context confirmation and preserves retained work. Unchanged routes need no confirmation. A pending plan is redisplayed with updated bindings and requires fresh conversational execution approval; do not recreate its scope merely to change models. Do not infer model speed or quality from its name.
+
 ## Clarify during planning
 
 Ask the user in normal conversation when missing information materially affects scope, expected behavior, acceptance criteria or implementation choices. First inspect available repository context and prior answers. Do not ask again about settled decisions.
@@ -32,6 +34,10 @@ A clarification answer supplies requirements, not execution approval. Incorporat
 
 Use `delivery_status` for retained state and `delivery_resume` for supported recovery. Users can enter `/delivery` without arguments to get a resume confirmation for retained work; do not require them to remember a recovery subcommand. Never replay an unknown launch or reset exhausted rounds merely because the user said “continue.” If no proposal is pending, submit a corrected proposal before requesting approval; do not loop on execution calls.
 
+Follow the reported next action. Status distinguishes configured routes for new plans from models bound to the retained attempt. While a coder is running, `delivery_steer` can request that it prioritize its existing approved checks; direct `subagent steer` remains blocked. Runner acceptance is not proof the message was delivered or acted on. A blocked tool request delivered no steering message.
+
+Inspect native transcript command results before describing verification. Missing `dist/` does not prove tests never ran, and gaps between tool calls do not establish why a model is slow. Report observed commands, exit results and remaining failures. A continuation should run current-task checks early and investigate their failures rather than repeat broad repository discovery.
+
 When review rounds are genuinely exhausted and there is no owned child, reserved continuation or legacy check-order repair, the old execution is terminal—not a locked repository. Read the retained requirements and latest findings in `delivery_status` and prepare a **new corrective plan** with `delivery_plan`. Preserve partial work, unfinished tasks and final checks. No saved Markdown file is required. Show that proposal, then obtain fresh approval before execution. This does not reset or automatically replay the exhausted execution. Do not demand a harness reset or keep acknowledging approval without proposing the correction.
 
 Closed native transport failures (including `partial` runs) retry automatically on the exact approved route, at most twice per task/review round/stage, after 5 and 10 seconds. Partial changes, previous logs, review gates and consumed budgets are preserved. Do not request another approval, a route change or an initial commit for these retries.
@@ -39,5 +45,7 @@ Closed native transport failures (including `partial` runs) retry automatically 
 For other non-timeout failed native workers, `delivery_resume` first confirms closure and the original model, then retains the failure receipt and coding spend without restarting execution. This is reconciliation, not a successful retry. Inspect the native error and current partial work before proposing corrections; a provider failure alone is not a code finding. A failed reviewer must not cause completed coding to be replayed. Unknown closure or model evidence remains blocked. An exhausted continuation is terminal, not permission for another automatic attempt.
 
 A known native read-only preflight rejection can be retried through confirmation without replaying coding. Other ambiguous launches require investigation. Preserve partial files, original test evidence, reports, consumed time and final gates. Do not edit session JSON externally.
+
+An exact native model-exclusion preflight rejection is also recoverable: `delivery_resume` closes the proven non-launch reservation while preserving its plan and evidence. Then prepare a corrective proposal, using `delivery_configure` only if the user wants different models. Repeated resume calls on a closed attempt return guidance, not another execution. Do not ask the user to abandon the session.
 
 Before claiming completion, inspect actual checks and independent reviews. State missing evidence explicitly. No automatic commits, pushes, deployments or session sharing. These are trusted-session controls, not an OS sandbox.

@@ -9,6 +9,7 @@ const ENTRY='delivery-mode-v1';
 const result=(text,details={})=>({content:[{type:'text',text}],details});
 const modelId=m=>m?`${m.provider}/${m.id}`:'';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+class OwnedRunBusy extends Error {}
 
 export function registerDelivery(pi,schemas,deps={}) {
   if(deps.child ?? process.env.PI_SUBAGENT_CHILD==='1') return;
@@ -51,7 +52,7 @@ export function registerDelivery(pi,schemas,deps={}) {
   }
   function display(text) {pi.sendMessage({customType:'delivery',content:text,display:true});}
   function status() {
-    const route=['checks','review-checks','verification'].includes(s.stage)?'host verification':s.routes?.[s.stage] || config?.routes?.planning || ASTRA;
+    const route=['checks','review-checks','verification'].includes(s.stage)?'host verification':s.active?.model || (s.stage==='blocked'?s.failedRun?.model:null) || s.routes?.[s.stage] || config?.routes?.planning || ASTRA;
     return !s.enabled?'Delivery OFF · /delivery setup':`Delivery ${s.reason?'BLOCKED':'ON'} · ${s.stage} · ${route} · ${s.plan?`task ${s.task+1}/${s.plan.tasks.length}`:'awaiting plan'}${s.reason?' · '+s.reason:''}`;
   }
   function terminalCorrection() {
@@ -66,29 +67,53 @@ export function registerDelivery(pi,schemas,deps={}) {
   function statusText() {
     const lines=[status()];
     if(s.active?.id)lines.push(`Retained child: ${s.active.id}`);
+    lines.push('Next action: '+nextAction().message);
+    lines.push('Configured routes for new plans: '+JSON.stringify(config?.routes || {}));
+    if(s.routes)lines.push('Routes bound to retained plan: '+JSON.stringify(s.routes));
+    if(s.plan) {
+      const currentReviewed=s.reports.some(r=>r.task===s.task && r.round===s.round && r.stage===(s.plan.security?'security':'quality') && r.report.status==='approved');
+      lines.push(`Tasks through required reviews: ${s.stage==='complete'?s.plan.tasks.length:s.task+Number(currentReviewed)}/${s.plan.tasks.length}. Final verification: ${s.stage==='complete'?'complete':'not complete'}.`);
+    }
+    if(s.active?.id) {
+      try {
+        const progress=d.runProgress(s.active);
+        if(progress)lines.push('Native worker evidence (activity is not verification): '+JSON.stringify(progress));
+      } catch(e){lines.push('Native worker evidence unavailable: '+e.message);}
+    }
+    if(s.checks?.length)lines.push('Host check results: '+JSON.stringify(s.checks));
     if(terminalCorrection()) {
       const latest=s.reports.filter(r=>r.task===s.task).at(-1)?.report;
       lines.push(correctivePlanAction(),'Retained plan context (requirements, not execution authorization):',JSON.stringify({title:s.plan.title,sourcePlan:s.plan.sourcePlan,remainingTasks:s.plan.tasks.slice(s.task),finalChecks:s.plan.checks,failedAttempt:s.failedRun,latestReview:latest?{status:latest.status,summary:latest.summary,findings:latest.findings}:null},null,2));
     }
     return lines.join('\n');
   }
+  function nextAction() {
+    if(!s.enabled)return {action:'activate',message:'Activate /delivery to begin.'};
+    if(job)return {action:'monitor',message:'Execution is running. Use delivery_status; do not call setup, resume or execute. For a running coder, delivery_steer can request current-task verification.'};
+    if(s.active || s.pendingContinuation || s.pendingRetry || s.resumeStage)return {action:'resume',message:'Call delivery_resume to reconcile retained execution. Do not replace its plan or change routes yet.'};
+    if(terminalCorrection())return {action:'plan',message:'Call delivery_plan with a corrective plan from retained context. Setup is unnecessary unless you want different models; use delivery_configure for explicit route changes.'};
+    if(s.stage==='awaiting-approval')return {action:'approve',message:'The displayed plan awaits conversational approval. After approval, call delivery_execute. Do not repeat setup or resume.'};
+    if(s.stage==='complete')return {action:'complete',message:'Execution completed. Report the recorded checks and reviews.'};
+    if(s.stage==='blocked')return {action:'inspect',message:'Inspect the retained reason and evidence before preparing a correction; setup only changes model routes.'};
+    return {action:'plan',message:'Describe the task and prepare it with delivery_plan. Setup is only needed for missing routes or requested model changes.'};
+  }
   function save() {pi.appendEntry(ENTRY,{...structuredClone(s),workspace:root,owner:ctx.sessionManager.getSessionId()});ctx.ui.setStatus('delivery',status());}
   function block(error) {
     s.stage='blocked';s.reason=error instanceof Error?error.message:String(error);
-    if(rejectedReadOnlyLaunch())s.active.preflightRejection ||= s.reason;
+    if(rejectedReadOnlyLaunch() || rejectedExcludedModelLaunch())s.active.preflightRejection ||= s.reason;
     save();display(`Delivery blocked: ${s.reason}${s.active?.id?'\nRun: '+s.active.id:''}`);
   }
   function restrict() {
     if(!originalTools) originalTools=pi.getActiveTools();
     const discovered=pi.getAllTools?.().map(t=>t.name) || [];
-    const candidates=new Set([...originalTools,...pi.getActiveTools(),...discovered,'delivery_plan','delivery_execute','delivery_resume','delivery_status','delivery_diff']);
+    const candidates=new Set([...originalTools,...pi.getActiveTools(),...discovered,'delivery_plan','delivery_execute','delivery_resume','delivery_status','delivery_diff','delivery_configure','delivery_steer']);
     pi.setActiveTools([...candidates].filter(name=>parentToolAllowed(name,{action:'status'}) || name==='subagent_supervisor'));
   }
   function available() {return ctx.modelRegistry.getAvailable().map(modelId);}
   async function selectPlanning() {
     const id=config?.routes?.planning || ASTRA;
     const m=ctx.modelRegistry.getAvailable().find(m=>modelId(m)===id);
-    if(!m || !await pi.setModel(m)) {s.reason=`Planning model unavailable: ${id}. Use /delivery setup or /login.`;save();return false;}
+    if(!m || (modelId(ctx.model)!==id && !await pi.setModel(m))) {s.reason=`Planning model unavailable: ${id}. Configure provider access with /login or choose an available planning route with /delivery setup.`;save();return false;}
     return true;
   }
   async function activate() {
@@ -99,8 +124,39 @@ export function registerDelivery(pi,schemas,deps={}) {
     }
     save();
   }
-  function guardIdle() {if(job || s.active || s.pendingRetry) throw new Error('An owned run is active or unresolved; inspect status before changing the plan.');}
+  function guardIdle() {if(job || s.active || s.pendingRetry) throw new OwnedRunBusy('An owned run is active or unresolved; no plan or configuration was changed. '+nextAction().message);}
   function refreshConfig() {config=d.loadConfig(d.configPath());}
+  function reconcileOrphanedRun() {
+    if(job || !s.active?.id)return false;
+    const evidence=d.orphanedRunEvidence(s.active);
+    if(!evidence)return false;
+    // Runtime duration is unknown. Charge the entire reserved allowance rather
+    // than refunding time or granting a continuation after evidence was lost.
+    if(!Number.isFinite(s.active.budgetMs) || s.active.budgetMs<=0)throw new Error('Reboot confirmed, but the retained worker budget is missing; inspect the saved run before recovery.');
+    chargeCoding({durationMs:s.active.budgetMs});
+    const reason='Worker records were lost after a host reboot; the previous worker cannot still be running. Completion and verification are unknown.';
+    s.failedRun={...s.active,task:s.task,round:s.round,state:'failed',error:reason,closureEvidence:evidence,durationMs:s.active.budgetMs,durationEstimated:true};
+    s.active=null;s.pendingContinuation=false;delete s.pendingRetry;delete s.resumeStage;
+    s.stage='blocked';s.reason=reason;approvalTurn=null;fileIntent=null;save();
+    display('Retired the interrupted worker after a confirmed host reboot. Partial files, the plan, reviews and consumed budget are preserved. Setup is available; execution requires a new corrective plan. No worker was launched.');
+    return true;
+  }
+  function guardConfiguration() {
+    reconcileOrphanedRun();
+    guardIdle();
+    if(s.pendingContinuation || s.resumeStage)throw new Error('Retained execution must be reconciled with delivery_resume before changing routes.');
+  }
+  async function saveConfiguration(next) {
+    const rebind=s.stage==='awaiting-approval' && s.plan;
+    if(rebind && snapshot()!==s.snapshot)throw new Error('Workspace changed since proposal; refresh it with delivery_plan before changing routes.');
+    const retainedReason=s.stage==='blocked'?s.reason:'';
+    d.saveConfig(d.configPath(),next);config=next;approvalTurn=null;fileIntent=null;
+    if(!s.plan)s=initialState();
+    if(rebind){s.routes=structuredClone(next.routes);s.timeouts=timeoutPolicy(next.timeouts);}
+    await activate();
+    if(retainedReason && !s.reason){s.reason=retainedReason;save();}
+    if(rebind)display(readablePlan(next.routes));
+  }
   // Proposal validation: only the currently configured exact routes/budgets. It never compares
   // against a stopped/completed run's bindings, so a terminal old/new route mismatch still permits
   // a fresh proposal (which launches nothing and reuses no approvals).
@@ -119,9 +175,11 @@ export function registerDelivery(pi,schemas,deps={}) {
   }
   function briefing(stage) {
     const task=s.plan.tasks[s.task];
+    const recovering=s.pendingContinuation || s.active?.continuation || (s.interruptions || []).some(r=>r.task===s.task && r.error);
     const scope={title:s.plan.title,mode:s.plan.mode || 'implementation',approvedRoutes:s.routes,sourcePlan:s.plan.sourcePlan,coverageWarnings:s.coverageWarnings,reviewRange:s.plan.reviewRange,taskIndex:s.task,task,interruptions:(s.interruptions || []).filter(r=>r.task===s.task),completedTasks:s.plan.tasks.slice(0,s.task),checks:s.plan.mode==='review'?s.plan.checks:checksForTask(s.plan,s.task),finalChecks:s.plan.checks};
     return [
       stage==='coder'?'Implement only this approved task. Follow selected SPARK TDD/debugging/verification skills.':`Read-only review. Do not modify any files. Independent ${stage} review. Inspect actual source and the full current diff for current-task acceptance and earlier-task regressions. Later task deliverables are not required yet. No edits or commands.`,
+      stage==='coder' && recovering?'Recovery priority: after reading applicable repository instructions, run the approved current-task checks on the existing work: '+JSON.stringify(checksForTask(s.plan,s.task))+'. Use actual failures to target inspection and fixes. Avoid repeating broad repository discovery. The remaining budget includes verification; report exact command results and unresolved failures before it ends.':'',
       'No commit, push, merge, deploy, credentials access or delegation. Preserve unrelated changes. Stop for scope questions; do not widen scope.',
       'Return your result using the supplied structured_output schema. status=approved requires findings=[]; put successful checks, completed work and informational evidence in summary, never in findings. Use changes_requested for actionable fixes; blocked for missing evidence. findings are concise strings with severity, file:line, evidence, impact and fix. This schema replaces prose/fenced/JSON-only report formatting from role skills.',
       JSON.stringify(scope),
@@ -130,7 +188,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       s.plan.sourcePlan?`Read the authoritative Markdown plan at ${s.plan.sourcePlan.path}; preserve its global constraints and task boundaries. Do not edit this approved document, including checkboxes; report progress separately.`:'',
       'Uncovered symlink targets are not dependencies you may silently use. Stop if this task needs one. Do not delete or repair unrelated links.',
       s.feedback?'Prior actionable findings: '+s.feedback:'',
-      s.pendingContinuation || s.active?.continuation || (s.interruptions || []).some(r=>r.task===s.task && r.error)?`Continue the same approved task from its partial changes. Start with verification of the partial workspace, inspect the previous tool logs, and finish only remaining work. Do not discard or reimplement completed work. Previous interrupted runs: ${JSON.stringify((s.interruptions || []).filter(r=>r.task===s.task))}`:'',
+      recovering?`Continue the same approved task from its partial changes. Start with verification of the partial workspace, inspect the previous tool logs, and finish only remaining work. Do not discard or reimplement completed work. Previous interrupted runs: ${JSON.stringify((s.interruptions || []).filter(r=>r.task===s.task))}`:'',
       stage==='coder'?'':d.diff(root,s.plan.reviewRange),
       s.plan.mode==='review'?`Read-only validation: report findings only. Do not implement or fix anything. For a committed range, untracked files are out of scope. Read the FULL diff in chunks from ${d.reviewPatch(root,s.plan.reviewRange)}; the inline preview may be truncated.`:'',
       stage==='coder'?'':'Host verification evidence: '+JSON.stringify(s.checks || []),
@@ -244,7 +302,7 @@ export function registerDelivery(pi,schemas,deps={}) {
     return typeof reason==='string' && reason.replace(/^Run fan-out: \d+\/\d+ used, \d+ remaining\n/,'')===expected;
   }
   function retainPreflightProof(entries) {
-    if(rejectedReadOnlyLaunch()) {s.active.preflightRejection ||= s.reason;return;}
+    if(rejectedReadOnlyLaunch() || rejectedExcludedModelLaunch()) {s.active.preflightRejection ||= s.reason;return;}
     if(!s.active || s.active.preflightRejection!==undefined || s.reason!=='Retained child requires /delivery resume reconciliation')return;
     // Older startup code overwrote reason. Recover only from consecutive entries
     // of this exact reservation/execution; never cross changed evidence or owners.
@@ -255,16 +313,32 @@ export function registerDelivery(pi,schemas,deps={}) {
       const prior=entry.data;
       if(!prior || identity(prior)!==key)break;
       if(prior.reason==='Retained child requires /delivery resume reconciliation')continue;
-      if(rejectedReadOnlyLaunch(prior))s.active.preflightRejection=prior.active.preflightRejection ?? prior.reason;
+      if(rejectedReadOnlyLaunch(prior) || rejectedExcludedModelLaunch(prior))s.active.preflightRejection=prior.active.preflightRejection ?? prior.reason;
       break; // A newer unknown failure cannot be bypassed using older evidence.
     }
   }
+  function rejectedExcludedModelLaunch(state=s) {
+    const a=state.active;
+    if(state.stage!=='blocked' || !a || a.id!==null || a.dir!==null || !AGENTS[a.stage] || a.model!==state.routes?.[a.stage])return false;
+    // The pinned runner resolves explicit model exclusions before launching a child.
+    // Only this exact preflight diagnostic proves non-launch; transport errors do not.
+    const prefix=`Requested subagent model '${a.model}' is excluded and cannot be replaced by a fallback (reason: `;
+    const reason=a.preflightRejection ?? state.reason;
+    return typeof reason==='string' && reason.startsWith(prefix) && /^[^\r\n]{1,320}\)\.$/.test(reason.slice(prefix.length));
+  }
   async function resumeOwned(taskChecks) {
-    if(job)throw new Error('Delivery is already running');
+    if(job)return 'Delivery is already running. '+nextAction().message;
     if(taskChecks===undefined && s.stage==='planning' && !s.plan && !s.active && !s.pendingContinuation && !s.pendingRetry && !s.resumeStage) {
       return 'No delivery task has started in this session. Describe your task normally. Reviews run directly; implementation waits for your conversational approval.';
     }
     config=d.loadConfig(d.configPath());
+    if(reconcileOrphanedRun())return statusText();
+    if(taskChecks===undefined && rejectedExcludedModelLaunch()) {
+      const reason=s.active.preflightRejection ?? s.reason;
+      s.failedRun={...s.active,task:s.task,round:s.round,state:'failed',error:reason,nativeError:reason,notLaunched:true,durationMs:0,sessionFiles:[]};
+      s.active=null;delete s.resumeStage;s.reason=reason;save();
+      return 'Excluded-model preflight reconciled: no worker was launched and no execution restarted. Retained plan, partial work, reviews and coding budget are preserved. Use delivery_configure only if the user wants different models. '+correctivePlanAction();
+    }
     if(taskChecks===undefined && rejectedReadOnlyLaunch()) {
       const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts);
       if(snapshot()!==s.snapshot)throw new Error('Workspace changed since review; preflight recovery refused');
@@ -303,7 +377,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       const progress=d.runProgress(s.active);
       if(progress?.timedOut && s.active.stage==='coder') {
         if(s.recoverySnapshot && snapshot()!==s.recoverySnapshot)throw new Error('Workspace changed after timeout; inspect changes and obtain fresh approval');
-        if(!d.isSettled(s.active))throw new Error('Previous writer has not been confirmed closed; no replacement launched');
+        if(!d.isSettled(s.active))return 'Waiting for the timed-out writer to close; no replacement launched. Use delivery_status to inspect recorded evidence. Retry delivery_resume after runner closure is confirmed; do not replace the plan or infer closure from silence.';
         await approveRecoveryPolicy();
         routeCheck();if(queueContinuation(progress)){start();return;}
         return 'Failed attempt reconciled; no execution restarted. Inspect delivery_status for the corrective-plan path.';
@@ -318,7 +392,8 @@ export function registerDelivery(pi,schemas,deps={}) {
       await approveRecoveryPolicy();s.stage='coder';
     }
     else if(['checks','review-checks','verification','spec','quality','security'].includes(s.resumeStage))s.stage=s.resumeStage;
-    else if(terminalCorrection())throw new Error(correctivePlanAction());
+    else if(terminalCorrection())return statusText();
+    else if(['awaiting-approval','complete'].includes(s.stage))return statusText();
     else throw new Error('No retained run or safe continuation to resume');
     delete s.resumeStage;s.reason='';save();start();
   }
@@ -469,7 +544,32 @@ export function registerDelivery(pi,schemas,deps={}) {
     await launchApproved();return result('Execution started. Use delivery_status for actual progress.');
   }});
   pi.registerTool({name:'delivery_resume',label:'Continue approved delivery',description:'Continue an already approved interrupted task within its existing scope; route/budget changes require explicit confirmation. Confirmed coding timeouts allow one bounded same-model continuation after runner closure. Legacy budget changes require user confirmation. For legacy multi-task check-order failures, provide taskChecks derived from the approved source plan; one confirmation covers check ordering plus any configured route/budget changes. Final checks and completed coder evidence are preserved. An exact known read-only preflight non-launch can be retried after confirmation without coder replay. Closed failed children are reconciled without restarting execution; their evidence and coding spend are retained. Closed transport failures retry twice on the same route within the remaining budget; other failures are not auto-retried.',parameters:schemas.resume || schemas.empty,async execute(_id,params,_signal,_update,c){ctx=c;if(!s.enabled)throw new Error('Activate delivery first');const message=await resumeOwned(params.taskChecks);return result(message || 'Recovery started. Use delivery_status for actual progress.');}});
-  pi.registerTool({name:'delivery_status',label:'Delivery status',description:'Read actual delivery state, approved routes and evidence.',parameters:schemas.empty,async execute(){return result(statusText(),structuredClone(s));}});
+  pi.registerTool({name:'delivery_status',label:'Delivery status',description:'Read actual delivery state, next action, configured versus bound routes and native worker evidence. Activity and transcript paths are not proof checks passed.',parameters:schemas.empty,async execute(){refreshConfig();return result(statusText(),{...structuredClone(s),nextAction:nextAction(),configuredRoutes:structuredClone(config.routes)});}});
+  pi.registerTool({name:'delivery_configure',label:'Delivery model routes',description:'Inspect configured routes and available exact model IDs without running setup. Supply only routes the user explicitly wants changed. Shows a confirmation before saving; unchanged routes do not prompt. Preserves retained work. A pending plan is redisplayed on the new routes and needs fresh execution approval. Running or unresolved execution cannot be reconfigured.',parameters:schemas.configure || schemas.empty,async execute(_id,params={},_signal,_update,c){
+    ctx=c;if(!root)root=d.repoRoot(ctx.cwd);refreshConfig();
+    if(params.routes===undefined)return result(JSON.stringify({configuredRoutes:config.routes,availableModels:available(),nextAction:nextAction()},null,2));
+    if(!params.routes || typeof params.routes!=='object' || Array.isArray(params.routes) || Object.keys(params.routes).some(r=>!ROLES.includes(r)))throw new Error('Supply only named delivery model routes.');
+    const routes=validateRoutes({...config.routes,...params.routes},available());
+    if(JSON.stringify(routes)===JSON.stringify(config.routes))return result('Requested routes are already configured. No setup or confirmation needed. '+nextAction().message);
+    guardConfiguration();
+    const baseline=JSON.stringify(config),identity=JSON.stringify(s);
+    const changes=ROLES.filter(r=>routes[r]!==config.routes[r]).map(r=>`${r}: ${config.routes[r] || 'unset'} → ${routes[r]}`);
+    if(!ctx.hasUI || !await ctx.ui.confirm('Change delivery model routes?',changes.join('\n')+'\nSelected providers receive project context. Retained work and evidence are preserved. This does not start execution.'))return result('Routes unchanged; route change was not confirmed.');
+    refreshConfig();
+    if(closed || JSON.stringify(config)!==baseline || JSON.stringify(s)!==identity)throw new Error('Delivery state or configuration changed during confirmation; no routes saved.');
+    validateRoutes(routes,available());
+    await saveConfiguration({...config,routes});
+    return result('Routes saved; retained work preserved. '+nextAction().message);
+  }});
+  pi.registerTool({name:'delivery_steer',label:'Prioritize current verification',description:'Ask the currently running owned coder to prioritize its approved task checks and targeted fixes. Uses a fixed in-scope message; cannot change scope, model, tools, budget, or worker. Acceptance by the runner does not prove delivery to the worker.',parameters:schemas.empty,async execute(_id,_params,_signal,_update,c){
+    ctx=c;
+    if(!s.enabled || closed || !s.active?.id || s.active.stage!=='coder' || s.stage!=='coder')throw new Error('No running owned coder to steer. '+nextAction().message);
+    const progress=d.runProgress(s.active);
+    if(progress?.state!=='running')throw new Error('Native worker is not confirmed running; inspect delivery_status.');
+    const message='Prioritize verification of the existing partial workspace using these approved current-task checks: '+JSON.stringify(checksForTask(s.plan,s.task))+'. Inspect only the context needed for failing checks, fix within the approved task, and rerun affected checks. Preserve completed work. Do not widen scope, skip reviews, change models or extend the deadline. If unable to finish, report exact remaining failures and command results.';
+    const receipt=await d.rpc(pi.events,'steer',{id:s.active.id,message});
+    return result('Verification steering request accepted by the runner. Delivery to the worker and execution of checks are not yet confirmed.',{receipt});
+  }});
   pi.registerTool({name:'delivery_diff',label:'Delivery diff',description:'Read git status and diff in 40k-character pages; pass offset to continue. Pass commits=N for the last N commits with pinned revisions and subjects. Defaults to proposed committed range or working-tree changes.',parameters:schemas.diff || schemas.empty,async execute(_id,params={}){if(!s.enabled)throw new Error('Activate /delivery');const count=params.commits ?? s.reviewCommits;const range=params.commits!==undefined?d.revisionRange(root,params.commits):(s.plan?.reviewRange || (count?d.revisionRange(root,count):undefined));const offset=params.offset ?? 0;if(!Number.isInteger(offset)||offset<0)throw new Error('Invalid diff offset');return result(d.diff(root,range,40000,offset),range || {});}});
 
   pi.registerCommand('delivery',{
@@ -481,14 +581,15 @@ export function registerDelivery(pi,schemas,deps={}) {
         if(!root) root=d.repoRoot(ctx.cwd);
         config=d.loadConfig(d.configPath());
         const command=args.trim();
-        if(command==='status') {display(status()+'\n'+JSON.stringify(s,null,2));return;}
+        if(command==='status') {display(statusText());return;}
         if(command==='models') {
           const rows=catalog(ctx.modelRegistry.getAll(),ctx.modelRegistry.getAvailable());
           const cli=['claude','codex','cursor-agent'].map(name=>({name,installed:(process.env.PATH||'').split(':').some(dir=>{try{accessSync(join(dir,name),constants.X_OK);return true;}catch{return false;}})}));
           display(JSON.stringify({models:rows,externalCli:cli,note:'Available means locally configured, not tested/qualified. External CLIs are discovery-only, not delivery execution routes. No inference was run.'},null,2));return;
         }
         if(command==='setup') {
-          guardIdle();if(!ctx.hasUI){display('Run /delivery setup in interactive pi to select routes and approve provider access.');return;}
+          guardConfiguration();if(!ctx.hasUI){display('Run /delivery setup in interactive pi to select routes and approve provider access.');return;}
+          const baseline=JSON.stringify(config),identity=JSON.stringify(s);
           const models=ctx.modelRegistry.getAvailable();
           const choices=models.map(modelId).sort();if(!choices.length)throw new Error('No configured models. Configure a provider with /login, then reload.');
           const next=structuredClone(config);
@@ -505,7 +606,11 @@ export function registerDelivery(pi,schemas,deps={}) {
           }
           if(!await ctx.ui.confirm('Save delivery routes and provider permission?',JSON.stringify(next.routes,null,2)+'\nSelected providers receive project context. No inference probes are run. Model metadata is not a performance guarantee. Plan approval, tests and independent reviews remain required; sensitive changes require security review.'))return;
           if(await ctx.ui.confirm('Enable automatic delivery in this repository?',root))next.repos=[...new Set([...next.repos,root])];
-          d.saveConfig(d.configPath(),next);config=next;s=initialState();await activate();display('Delivery setup saved. Describe your task normally. Reviews run directly; implementation waits for your conversational approval.');return;
+          refreshConfig();
+          if(closed || JSON.stringify(config)!==baseline || JSON.stringify(s)!==identity)throw new Error('Delivery state or configuration changed during setup; no routes saved.');
+          validateRoutes(next.routes,available());
+          await saveConfiguration(next);
+          display('Delivery setup saved. '+nextAction().message);return;
         }
         if(command==='off') {
           if(s.active && !d.isSettled(s.active)) {
@@ -546,7 +651,10 @@ export function registerDelivery(pi,schemas,deps={}) {
         s={...initialState(),enabled:true};await activate();
         if(command && !s.reason)pi.sendUserMessage(command,{deliverAs:'followUp'});
         else display(status());
-      } catch(e) {display(`Delivery: ${e.message}`);ctx.ui.notify(e.message,'error');}
+      } catch(e) {
+        if(e instanceof OwnedRunBusy) {display(e.message+'\n'+statusText());return;}
+        display(`Delivery: ${e.message}`);ctx.ui.notify(e.message,'error');
+      }
     }
   });
   pi.on('session_start',async(_e,c)=>{
@@ -562,6 +670,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       if(s.enabled) {
         retainPreflightProof(entries);
         restrict();await selectPlanning();
+        reconcileOrphanedRun();
         if(s.active) {s.stage='blocked';s.reason='Retained child requires /delivery resume reconciliation';}
         else if(!['planning','awaiting-approval','complete','blocked'].includes(s.stage)) {s.resumeStage=s.stage;s.stage='blocked';s.reason=['checks','review-checks','verification'].includes(s.resumeStage)?'Interrupted host verification; delivery_resume reruns approved checks':'Interrupted between stages; use delivery_resume to reconcile before further work';}
         else {try{validateRoutes(config.routes,available());}catch(e){s.reason=e.message;}}
@@ -570,7 +679,7 @@ export function registerDelivery(pi,schemas,deps={}) {
     }catch(e){ctx.ui.setStatus('delivery',`Delivery OFF · ${e.message}`);}
   });
   pi.on('input',async(e,c)=>{
-    ctx=c;
+    ctx=c;refreshConfig();
     if(['interactive','rpc'].includes(e.source)) {
       requestText=e.text || '';fileIntent=null;
       approvalTurn=s.stage==='awaiting-approval' && requestText.trim()?{key:planKey(),text:requestText}:null;
@@ -587,14 +696,18 @@ export function registerDelivery(pi,schemas,deps={}) {
   pi.on('before_agent_start',async(e,c)=>{
     ctx=c;if(!s.enabled)return;restrict();
     if(modelId(ctx.model)!==(config.routes.planning||ASTRA) && !await selectPlanning()){ctx.abort?.();return;}
-    return {systemPrompt:e.systemPrompt+'\n\nDELIVERY MODE ACTIVE. You are the planning/orchestration parent, never the implementer. Infer task intent from the user message AND conversation, not a command or keyword. During planning, ask the user concise questions in normal conversation whenever missing information materially affects scope, behavior, acceptance criteria or implementation choices. Read available repository context first; do not ask again about decisions already supplied. Ask one focused question at a time, offer concrete options when useful, and wait for the answer before finalizing the affected part of the plan. You may continue independent read-only investigation while waiting. Do not invent requirements or submit delivery_plan merely to avoid asking a question. A clarification answer is not approval to execute: incorporate it into the proposal, show the resolved plan, then obtain approval for that plan. Select relevant installed SPARK skills lazily: reviews use requesting-code-review/audit, bugs use debugging, new features use brainstorming/planning. UI work also uses available frontend/design/accessibility skills; pass selected skill paths and design requirements in task instructions. Do not invent missing skills. For review/validation requests, inspect delivery_diff (commits=N for recent commits), then call delivery_plan with mode=review: this starts reviewers automatically, with no coder or fixes. Do not ask for approval for the requested read-only review. Set start=false ONLY if the user asked for a plan without execution. Review criteria go in task.acceptance. For implementation, put each task\'s executable checks in tasks[].checks; top-level checks are FINAL release checks, run only after all tasks. Never assign a later task\'s test to an earlier task. Checks are commands, NEVER prose. Use checks=[] for static review and disclose tests not run. When the user explicitly requests execution of an existing Markdown plan, call delivery_execute with planFile even after reload; it adopts the file and returns instructions for deriving its tasks through delivery_plan. Preserve all task boundaries and global constraints. Do not demand prior registration or another approval for the same unchanged document. If unresolved scope/product decisions genuinely prevent execution, clarify rather than guess. Out-of-scope broken/external symlinks are coverage warnings, not reasons to demand repository repairs; do not follow or depend on their targets. For new changes, show a concise human-readable plan using delivery_plan with mode=implementation; wait for the user to agree in conversation, then CALL delivery_execute immediately. Do not merely promise to execute. Rejections, questions and requested revisions are not approval; clarify genuinely ambiguous intent. Never instruct the user to run /delivery approve or select a review mode. If a read-only review blocked because checks were invalid, prepare corrected executable checks and retry that review through delivery_plan. For a legacy multi-task implementation blocked by premature final checks, read delivery_status and the approved source plan, then call delivery_resume with taskChecks for every existing task. It corrects ordering after confirmation, preserves final gates and completed coding evidence, and resumes current-task checks and independent reviews without replaying the coder. Do not replace that implementation plan or increase retry limits. Read/search and delivery tools are available; parent shell/edit/write and direct child execution are blocked. The extension owns coder/reviewer execution. During a run, answer without changing scope. Coding timeouts have one bounded same-model continuation; do not request approval again for that already approved allowance. For retained interrupted work with an active/unresolved child or reserved continuation, use delivery_resume; never replace that owned child. Closed transport failures retry automatically at most twice on the same route, preserving partial work and budgets. Do not request another approval or route change for those retries. Other closed failed attempts are reconciled without automatic retry; inspect their native error and retained work before proposing further changes. An exhausted or failed terminal task with no owned child is different: inspect delivery_status and prepare its new corrective plan, not repeated resume/approval calls. No saved Markdown file is required when retained task context exists. For supported recovery, changed routes/budgets require explicit confirmation while retaining partial work; never replace an active or unresolved child with delivery_plan. Budget warnings are not proof of a stalled provider; a quiet running tool must not be killed. Only delivery_status establishes completion; never claim unrun checks or blocked work passed.\nCurrent state: '+status()+(terminalCorrection()?'\n'+correctivePlanAction():'')};
+    return {systemPrompt:e.systemPrompt+'\n\nDELIVERY MODE ACTIVE. You are the planning/orchestration parent, never the implementer. Infer task intent from the user message AND conversation, not a command or keyword. During planning, ask the user concise questions in normal conversation whenever missing information materially affects scope, behavior, acceptance criteria or implementation choices. Read available repository context first; do not ask again about decisions already supplied. Ask one focused question at a time, offer concrete options when useful, and wait for the answer before finalizing the affected part of the plan. You may continue independent read-only investigation while waiting. Do not invent requirements or submit delivery_plan merely to avoid asking a question. A clarification answer is not approval to execute: incorporate it into the proposal, show the resolved plan, then obtain approval for that plan. Select relevant installed SPARK skills lazily: reviews use requesting-code-review/audit, bugs use debugging, new features use brainstorming/planning. UI work also uses available frontend/design/accessibility skills; pass selected skill paths and design requirements in task instructions. Do not invent missing skills. For review/validation requests, inspect delivery_diff (commits=N for recent commits), then call delivery_plan with mode=review: this starts reviewers automatically, with no coder or fixes. Do not ask for approval for the requested read-only review. Set start=false ONLY if the user asked for a plan without execution. Review criteria go in task.acceptance. For implementation, put each task\'s executable checks in tasks[].checks; top-level checks are FINAL release checks, run only after all tasks. Never assign a later task\'s test to an earlier task. Checks are commands, NEVER prose. Use checks=[] for static review and disclose tests not run. When the user explicitly requests execution of an existing Markdown plan, call delivery_execute with planFile even after reload; it adopts the file and returns instructions for deriving its tasks through delivery_plan. Preserve all task boundaries and global constraints. Do not demand prior registration or another approval for the same unchanged document. If unresolved scope/product decisions genuinely prevent execution, clarify rather than guess. Out-of-scope broken/external symlinks are coverage warnings, not reasons to demand repository repairs; do not follow or depend on their targets. For new changes, show a concise human-readable plan using delivery_plan with mode=implementation; wait for the user to agree in conversation, then CALL delivery_execute immediately. Do not merely promise to execute. Rejections, questions and requested revisions are not approval; clarify genuinely ambiguous intent. Never instruct the user to run /delivery approve or select a review mode. If a read-only review blocked because checks were invalid, prepare corrected executable checks and retry that review through delivery_plan. For a legacy multi-task implementation blocked by premature final checks, read delivery_status and the approved source plan, then call delivery_resume with taskChecks for every existing task. It corrects ordering after confirmation, preserves final gates and completed coding evidence, and resumes current-task checks and independent reviews without replaying the coder. Do not replace that implementation plan or increase retry limits. Read/search and delivery tools are available; parent shell/edit/write and direct child execution are blocked. The extension owns coder/reviewer execution. During a run, answer without changing scope. Coding timeouts have one bounded same-model continuation; do not request approval again for that already approved allowance. For retained interrupted work with an active/unresolved child or reserved continuation, use delivery_resume; never replace that owned child. Closed transport failures retry automatically at most twice on the same route, preserving partial work and budgets. Do not request another approval or route change for those retries. Other closed failed attempts are reconciled without automatic retry; inspect their native error and retained work before proposing further changes. An exhausted or failed terminal task with no owned child is different: inspect delivery_status and prepare its new corrective plan, not repeated resume/approval calls. No saved Markdown file is required when retained task context exists. For supported recovery, changed routes/budgets require explicit confirmation while retaining partial work; never replace an active or unresolved child with delivery_plan. Budget warnings are not proof of a stalled provider; a quiet running tool must not be killed. Only delivery_status establishes completion; never claim unrun checks or blocked work passed.\nCurrent state: '+status()+'\nNext action: '+JSON.stringify(nextAction())+'\nUse delivery_configure without routes to inspect configuration and exact available model IDs. Only request setup for missing model configuration or an explicit user route change. For requested route changes, use delivery_configure with the selected exact IDs; it preserves work and shows a confirmation. Do not recommend model speed or capability from names alone. Use delivery_steer to prioritize approved checks in a running coder; direct subagent steer is blocked. A steering acknowledgment means the runner accepted the request, not that the worker received or acted on it. Read native transcript command results before claiming checks never ran, passed or failed; missing build artifacts and long gaps between tools do not establish those claims. A closed failed attempt needs a corrective proposal, not a new session. Follow the reported next action; repeating setup/resume/approval does not create a pending plan.'+(terminalCorrection()?'\n'+correctivePlanAction():'')};
   });
   pi.on('tool_call',async(e,c)=>{
     if(s.enabled && e.toolName==='subagent_supervisor' && e.input?.action==='reply') {
       const ok=s.active?.id && c.hasUI && await c.ui.confirm('Approve supervisor reply?',JSON.stringify(e.input)+'\nDo not approve scope/model changes here; those require a new delivery plan.');
       return ok?undefined:{block:true,reason:'Supervisor response needs explicit user approval'};
     }
-    if(s.enabled && !parentToolAllowed(e.toolName,e.input)) return {block:true,reason:'Delivery mode: parent mutation/unmanaged delegation is blocked. Use delivery_plan to route work; after explicit conversational approval use delivery_execute.',terminate:true};
+    if(s.enabled && !parentToolAllowed(e.toolName,e.input)) {
+      const reason=e.toolName==='subagent' && e.input?.action==='steer'?'Direct subagent steering is blocked. Use delivery_steer to prioritize the running owned coder\'s approved checks. No steering message was queued by this rejected call.':'Delivery mode: parent mutation/unmanaged delegation is blocked. No tool action was executed. Do not retry with a generic worker, different agent, cwd or async setting. Use delivery tools to continue; the extension owns dispatch on the configured model routes.';
+      // Reject the action without ending the turn, so the planner can recover.
+      return {block:true,reason:reason+'\nNext action: '+JSON.stringify(nextAction())};
+    }
   });
   pi.on('user_bash',()=>s.enabled?{result:{output:'Delivery mode blocks shell shortcuts. Use /delivery off explicitly for manual work.',exitCode:1,cancelled:false,truncated:false}}:undefined);
   pi.on('session_before_tree',()=>s.enabled?{cancel:true}:undefined);

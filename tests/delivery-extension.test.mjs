@@ -13,11 +13,127 @@ function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const models=[...new Set(Object.values(routes))].map(s=>{const [provider,...id]=s.split('/');return {provider,id:id.join('/')};});
  const ctx={cwd:'/repo',hasUI:true,mode:'tui',isIdle:()=>true,isProjectTrusted:()=>true,modelRegistry:{getAll:()=>models,getAvailable:()=>models},get model(){return model;},sessionManager:{getSessionId:()=> 'session',getBranch:()=>entries},ui:{setStatus:(k,v)=>statuses.push(v),notify:()=>{},confirm:async()=>true,select:async(t,opts)=>opts[0],input:async()=> 'trial'}};
  const pi={on:(e,h)=>events[e]=h,registerCommand:(n,c)=>commands[n]=c,registerTool:t=>tools[t.name]=t,appendEntry:(customType,data)=>entries.push({type:'custom',customType,data:structuredClone(data)}),setModel:async m=>{model=m;return true;},sendMessage:m=>messages.push(m),sendUserMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','edit','write','delivery_plan'],setActiveTools:()=>{},events:{}};
- const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false};
+ const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,orphanedRunEvidence:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false};
  const controller=registerDelivery(pi,{plan:{},empty:{}},deps);
  return {pi,ctx,events,commands,tools,entries,statuses,messages,calls,controller,deps,config};
 }
 const securityPreflightError="Run fan-out: 1/64 used, 63 remaining\nAgent 'delivery-security' was given an implementation task, but its tool allowlist has no mutation-capable tools. Add bash, edit, write, or another mutation-capable tool to the agent, or use a read-only task/agent.";
+test('blocked worker dispatch permits recovery through an approved delivery plan',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);const before=h.controller.state();
+ const rejected=await h.events.tool_call({toolName:'subagent',input:{agent:'worker',cwd:'/repo',async:false,task:'Fix the build'}},h.ctx);
+ assert.equal(rejected.block,true);assert.notEqual(rejected.terminate,true);
+ assert.match(rejected.reason,/No tool action was executed/);assert.match(rejected.reason,/delivery_plan/);
+ assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,[]);
+ await h.tools.delivery_plan.execute('plan',plan,null,null,h.ctx);
+ await assert.rejects(h.tools.delivery_execute.execute('go',{},null,null,h.ctx),/user reply/i);
+ await h.events.input({text:'approve',source:'interactive'},h.ctx);
+ await h.tools.delivery_execute.execute('go',{},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');
+ assert.equal(h.calls.find(c=>c.method==='spawn').params.agent,'delivery-coder');
+});
+test('rejected parent tools preserve owned work and point to recovery',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder}}));
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ for(const toolName of ['subagent','bash','edit','write']) {
+  const rejected=await h.events.tool_call({toolName,input:{}},h.ctx);
+  assert.equal(rejected.block,true);assert.notEqual(rejected.terminate,true);
+  assert.match(rejected.reason,/delivery_resume/);
+ }
+ assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,[]);
+});
+test('route inspection and unchanged route requests do not repeat setup or confirmation',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);const before=h.controller.state();
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ const inspected=JSON.parse((await h.tools.delivery_configure.execute('c',{},null,null,h.ctx)).content[0].text);
+ assert.deepEqual(inspected.configuredRoutes,routes);assert.ok(inspected.availableModels.includes(routes.coder));
+ const same=await h.tools.delivery_configure.execute('c',{routes:{coder:routes.coder}},null,null,h.ctx);
+ assert.match(same.content[0].text,/already configured/);assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,[]);
+});
+for(const decision of ['approve','decline','no-ui','config-race','state-race','shutdown','workspace-change'])test(`route change on pending proposal: ${decision}`,async()=>{
+ const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']});await h.events.session_start({},h.ctx);
+ await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);await h.events.input({text:'approve',source:'interactive'},h.ctx);
+ const before=h.controller.state(),saved=structuredClone(h.config);let confirmations=0;
+ if(decision==='no-ui')h.ctx.hasUI=false;
+ h.ctx.ui.confirm=async(_title,text)=>{
+  confirmations++;assert.match(text,/custom\/c → custom\/r/);
+  if(decision==='config-race')h.config.routes.security=routes.coder;
+  if(decision==='state-race')await h.commands.delivery.handler('off',h.ctx);
+  if(decision==='shutdown')await h.events.session_shutdown();
+  if(decision==='workspace-change')h.deps.fingerprint=()=> 'changed';
+  return decision!=='decline';
+ };
+ const change=h.tools.delivery_configure.execute('c',{routes:{coder:routes.spec}},null,null,h.ctx);
+ if(['config-race','state-race','shutdown','workspace-change'].includes(decision)) {
+  await assert.rejects(change,/changed/);
+  assert.equal(h.config.routes.coder,saved.routes.coder);
+ } else {
+  await change;
+  if(decision==='approve') {
+   assert.equal(h.config.routes.coder,routes.spec);assert.equal(h.controller.state().routes.coder,routes.spec);
+   assert.deepEqual(h.controller.state().plan,before.plan);assert.equal(h.controller.state().snapshot,before.snapshot);
+   assert.match(h.messages.at(-1).content,/coder: custom\/r/);
+   await assert.rejects(h.tools.delivery_execute.execute('e',{},null,null,h.ctx),/fresh user reply/);
+  } else {assert.deepEqual(h.config,saved);assert.deepEqual(h.controller.state(),before);}
+ }
+ assert.equal(confirmations,decision==='no-ui'?0:1);assert.deepEqual(h.calls,[]);
+});
+test('invalid routes fail before confirmation or saving',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ for(const routes of [{coder:'missing/model'},{unknown:'custom/c'}])await assert.rejects(h.tools.delivery_configure.execute('c',{routes},null,null,h.ctx),/model route|named delivery/);
+});
+for(const stage of ['awaiting-approval','complete'])test(`resume in ${stage} returns guidance without duplicate errors`,async()=>{
+ const h=harness(),notifications=[];h.entries.push(oldRunEntry(stage,routes));h.ctx.ui.notify=(...args)=>notifications.push(args);
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ await h.commands.delivery.handler('resume',h.ctx);await h.commands.delivery.handler('resume',h.ctx);
+ const status=await h.tools.delivery_status.execute();assert.equal(status.details.nextAction.action,stage==='complete'?'complete':'approve');
+ assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,[]);assert.deepEqual(notifications,[]);
+});
+test('status counts completed task reviews while final verification is still pending',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('verification',routes));await h.events.session_start({},h.ctx);
+ const status=await h.tools.delivery_status.execute();
+ assert.match(status.content[0].text,/Tasks through required reviews: 1\/1/);assert.match(status.content[0].text,/Final verification: not complete/);
+});
+test('configured and bound routes are distinct, with failed model and next action in visible status',async()=>{
+ const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{failedRun:{id:'closed',state:'failed',task:0,stage:'coder',model:routes.coder},reason:'failed'}));
+ await h.events.session_start({},h.ctx);h.config.routes.coder=routes.spec;
+ const status=await h.tools.delivery_status.execute();
+ assert.match(status.content[0].text.split('\n')[0],/custom\/c/);
+ assert.equal(status.details.configuredRoutes.coder,routes.spec);assert.equal(status.details.routes.coder,routes.coder);
+ assert.equal(status.details.nextAction.action,'plan');assert.match(status.content[0].text,/Configured routes for new plans/);
+ const notes=[];h.ctx.ui.notify=(...args)=>notes.push(args);const before=h.controller.state();
+ await h.commands.delivery.handler('resume',h.ctx);await h.commands.delivery.handler('resume',h.ctx);
+ assert.deepEqual(notes,[]);assert.deepEqual(h.controller.state(),before);
+});
+test('planning model is not reselected on every input',async()=>{
+ const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']}),set=h.pi.setModel;let changes=0;h.pi.setModel=async m=>{changes++;return set(m);};
+ await h.events.session_start({},h.ctx);
+ await h.events.input({text:'status?',source:'interactive'},h.ctx);await h.events.before_agent_start({systemPrompt:'base'},h.ctx);
+ assert.equal(changes,1);
+ h.config.routes.planning=routes.spec;await h.events.input({text:'continue',source:'interactive'},h.ctx);
+ assert.equal(changes,2);assert.equal(h.ctx.model.id,'r');
+});
+for(const nativeState of ['running','failed','unknown'])test(`owned verification steering: ${nativeState}`,async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder}}));
+ await h.events.session_start({},h.ctx);
+ h.deps.runProgress=()=>nativeState==='unknown'?null:{state:nativeState,model:routes.coder,attemptedModels:[routes.coder],sessionFiles:['/fake/transcript.jsonl']};
+ // Startup reconciliation is required; steering cannot act on a blocked retained child.
+ await assert.rejects(h.tools.delivery_steer.execute('s',{},null,null,h.ctx),/No running owned coder/);
+ if(nativeState!=='running')return;
+ h.deps.readOutcome=()=>null;
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ try {
+  const status=await h.tools.delivery_status.execute();assert.match(status.content[0].text,/transcript.jsonl/);assert.equal(status.details.nextAction.action,'monitor');
+  const response=await h.tools.delivery_steer.execute('s',{},null,null,h.ctx);
+  assert.match(response.content[0].text,/not yet confirmed/);
+  const steering=h.calls.filter(c=>c.method==='steer');assert.equal(steering.length,1);assert.equal(steering[0].params.id,'owned');assert.match(steering[0].params.message,/node --test/);
+  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+  const repeat=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);assert.match(repeat.content[0].text,/already running/);
+  await assert.rejects(h.tools.delivery_configure.execute('c',{routes:{coder:routes.spec}},null,null,h.ctx),/owned run/);
+  const direct=await h.events.tool_call({toolName:'subagent',input:{action:'steer',id:'owned',message:'change scope'}},h.ctx);assert.equal(direct.block,true);
+ } finally {await h.events.session_shutdown();await h.controller.settled();}
+});
 test('resume after setup explains how to start without errors or execution',async()=>{
  const h=harness(),notifications=[];h.ctx.ui.notify=(...args)=>notifications.push(args);
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('setup',h.ctx);
@@ -103,7 +219,7 @@ test('exhausted terminal run exposes retained requirements and a corrective-plan
  const status=await h.tools.delivery_status.execute();const text=status.content.map(c=>c.text||'').join('\n');
  assert.match(text,/new corrective plan/i);assert.match(text,/delivery_plan/);assert.match(text,/Add one/);assert.match(text,/preserve cleared values/);assert.match(text,/node --test/);assert.match(text,/No saved Markdown file is required/);
  const prompt=await h.events.before_agent_start({systemPrompt:'base'},h.ctx);assert.match(prompt.systemPrompt,/NEXT ACTION:.*delivery_plan/);
- await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/new corrective plan.*delivery_plan/i);
+ assert.match((await h.tools.delivery_resume.execute('r',{},null,null,h.ctx)).content[0].text,/new corrective plan.*delivery_plan/i);
  assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
  await h.tools.delivery_plan.execute('p',{...plan,title:'Correct remaining regression'},null,null,h.ctx);
  await assert.rejects(h.tools.delivery_execute.execute('e',{},null,null,h.ctx),/fresh user reply/i);
@@ -375,7 +491,7 @@ for(const kind of ['coder','security','unclosed','wrong-model'])test(`failed chi
   assert.equal(h.controller.state().failedRun.id,'failed-child');assert.equal(h.controller.state().failedRun.error,'Invalid API key.');
   assert.equal(h.controller.state().coding[0].spentMs,3287707+(stage==='coder'?34000:0));assert.equal(h.controller.state().coding[0].continuations,1);
   assert.deepEqual(h.controller.state().reports,before.reports);assert.equal(h.controller.state().round,1);
-  const retained=h.controller.state();await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/delivery_plan/);assert.deepEqual(h.controller.state(),retained);
+  const retained=h.controller.state();assert.match((await h.tools.delivery_resume.execute('r',{},null,null,h.ctx)).content[0].text,/delivery_plan/);assert.deepEqual(h.controller.state(),retained);
   const text=(await h.tools.delivery_status.execute()).content[0].text;assert.match(text,/Invalid API key/);assert.match(text,/delivery_plan/);
   if(stage==='security')assert.match(text,/Do not replay completed coding/);
  }
@@ -456,6 +572,41 @@ test('runtime failed child cannot become approved from prose',async()=>{
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/child failed/);
 });
 const oldRunEntry=(stage,oldRoutes,extra={})=>({type:'custom',customType:'delivery-mode-v1',data:{version:1,enabled:true,stage,task:0,round:2,plan,routes:oldRoutes,snapshot:'hash',active:null,reports:[{stage:'security',task:0,round:2,snapshot:'hash',runId:'old',report:{status:'approved',summary:'done',findings:[]}}],reason:stage==='blocked'?'Two fix/review rounds exhausted':'',workspace:'/repo',owner:'session',...extra}});
+const excludedModelError=model=>`Requested subagent model '${model}' is excluded and cannot be replaced by a fallback (reason: Connection error.; expires: 2026-09-16T12:59:57.188Z).`;
+test('excluded model preflight can be closed without replay or lost evidence, then routes changed',async()=>{
+ const h=harness(),rpc=h.deps.rpc;
+ h.deps.rpc=async(...args)=>{if(args[1]==='spawn')throw new Error(excludedModelError(routes.coder));return rpc(...args);};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);
+ await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const before=h.controller.state();assert.equal(before.active.id,null);
+ const response=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(response.content[0].text,/no worker was launched/);
+ const closed=h.controller.state();assert.equal(closed.active,null);assert.equal(closed.failedRun.notLaunched,true);
+ assert.deepEqual(closed.plan,before.plan);assert.deepEqual(closed.coding,before.coding);assert.deepEqual(closed.reports,before.reports);
+ await h.commands.delivery.handler('setup',h.ctx);
+ assert.deepEqual(h.controller.state().plan,closed.plan);assert.deepEqual(h.controller.state().failedRun,closed.failedRun);
+ const status=await h.tools.delivery_status.execute();assert.match(status.content[0].text,/new corrective plan/);
+ await h.tools.delivery_plan.execute('p',{...plan,title:'Finish retained work'},null,null,h.ctx);
+ assert.equal(h.controller.state().stage,'awaiting-approval');
+ await assert.rejects(h.tools.delivery_execute.execute('e',{},null,null,h.ctx),/fresh user reply/);
+});
+for(const evidence of ['matching','other-model','other-reservation','newer-unknown'])test(`legacy excluded-model preflight evidence: ${evidence}`,async()=>{
+ const h=harness();
+ const original=oldRunEntry('blocked',routes,{active:{id:null,dir:null,model:routes.coder,stage:'coder',startedAt:1},reason:excludedModelError(evidence==='other-model'?routes.spec:routes.coder)});
+ const current=structuredClone(original);current.data.reason='Retained child requires /delivery resume reconciliation';
+ if(evidence==='other-reservation')current.data.active.startedAt=2;
+ h.entries.push(original);
+ if(evidence==='newer-unknown'){const unknown=structuredClone(original);unknown.data.reason='pi-subagents spawn timed out';h.entries.push(unknown);}
+ h.entries.push(current);await h.events.session_start({},h.ctx);
+ const next=harness();next.entries.push(...structuredClone(h.entries));await next.events.session_start({},next.ctx);
+ if(evidence==='matching') {
+  await next.tools.delivery_resume.execute('r',{},null,null,next.ctx);
+  assert.equal(next.controller.state().active,null);assert.equal(next.controller.state().failedRun.notLaunched,true);
+ } else {
+  const before=next.controller.state();await assert.rejects(next.tools.delivery_resume.execute('r',{},null,null,next.ctx),/No retained run/);assert.deepEqual(next.controller.state(),before);
+ }
+ assert.deepEqual(next.calls,[]);
+});
 test('terminal old/new route mismatch permits a replacement proposal without launching',async()=>{
  const h=harness();h.entries.push(oldRunEntry('complete',{...routes,coder:routes.spec,security:routes.spec}));
  await h.events.session_start({},h.ctx);
@@ -607,4 +758,73 @@ test('bare delivery reports a running worker without prompting or replacing it',
  const before=h.controller.state();h.ctx.ui.confirm=async()=>{throw new Error('Unexpected prompt');};
  await h.commands.delivery.handler('',h.ctx);assert.deepEqual(h.controller.state(),before);
  await h.events.session_shutdown();release();await h.controller.settled();
+});
+test('busy commands report status once without changing or steering the live worker',async()=>{
+ const h=harness(),notifications=[];let release;h.deps.readOutcome=()=>null;
+ h.ctx.ui.notify=(...args)=>notifications.push(args);
+ const rpc=h.deps.rpc;h.deps.rpc=async(...args)=>{const r=await rpc(...args);if(args[1]==='status')await new Promise(resolve=>{release=resolve;});return r;};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);
+ while(!release)await new Promise(r=>setImmediate(r));
+ try {
+  const before=h.controller.state(),calls=structuredClone(h.calls);
+  h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+  for(const command of ['setup','approve','fix the build','setup']) {
+   const count=h.messages.length;
+   await h.commands.delivery.handler(command,h.ctx);
+   assert.equal(h.messages.length,count+1);assert.match(h.messages.at(-1).content,/Execution is running.*delivery_status/);
+   assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,calls);
+  }
+  assert.deepEqual(notifications,[]);
+ } finally {await h.events.session_shutdown();release();await h.controller.settled();}
+});
+test('unclosed timeout recovery waits without errors or replacement, then continues after closure',async()=>{
+ const h=harness(),notifications=[];let settled=false;
+ h.ctx.ui.notify=(...args)=>notifications.push(args);
+ h.entries.push(oldRunEntry('blocked',routes,{timeouts:timeoutPolicy(),active:{id:'old',dir:'/fake',stage:'coder',model:routes.coder,budgetMs:2700000,startedAt:0}}));
+ h.deps.isSettled=()=>settled;
+ h.deps.runProgress=a=>a.id==='old'?{state:'failed',timedOut:true,model:a.model,attemptedModels:[a.model],durationMs:2700000,sessionFiles:[]}:null;
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ for(let i=0;i<2;i++) {
+  await h.commands.delivery.handler('resume',h.ctx);
+  assert.match(h.messages.at(-1).content,/Waiting for the timed-out writer to close/);
+  assert.deepEqual(h.controller.state(),before);
+ }
+ const response=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(response.content[0].text,/no replacement launched.*delivery_status/);
+ assert.deepEqual(h.controller.state(),before);assert.deepEqual(notifications,[]);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ settled=true;await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);
+});
+
+for(const entryPoint of ['startup','setup','resume'])test(`missing worker after reboot is retired through ${entryPoint} without replay`,async()=>{
+ const h=harness();const active={id:'lost',dir:'/gone',stage:'coder',model:routes.coder,budgetMs:900000,startedAt:1000,continuation:true};
+ h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active,coding:{0:{spentMs:2700000,continuations:1}}}));
+ const evidence={kind:'host-reboot',bootedAt:100000,startedAt:1000,missingPath:'/gone/status.json'};
+ if(entryPoint==='startup')h.deps.orphanedRunEvidence=()=>evidence;
+ await h.events.session_start({},h.ctx);const planBefore=h.controller.state().plan;
+ h.deps.orphanedRunEvidence=()=>evidence;
+ if(entryPoint==='setup')await h.commands.delivery.handler('setup',h.ctx);
+ if(entryPoint==='resume')await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ const state=h.controller.state();assert.equal(state.active,null);assert.equal(state.stage,'blocked');
+ assert.equal(state.coding[0].spentMs,3600000);assert.equal(state.coding[0].continuations,1);
+ assert.equal(state.failedRun.id,'lost');assert.deepEqual(state.failedRun.closureEvidence,evidence);
+ assert.equal(state.failedRun.durationEstimated,true);assert.deepEqual(state.plan,planBefore);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);assert.equal(h.controller.state().coding[0].spentMs,3600000);
+ await h.commands.delivery.handler('setup',h.ctx);assert.ok(h.messages.some(m=>m.content?.includes('Delivery setup saved')));
+});
+test('missing same-boot worker evidence does not release ownership or allow setup',async()=>{
+ const h=harness();const active={id:'unknown',dir:'/gone',stage:'coder',model:routes.coder,budgetMs:900000,startedAt:1000};
+ h.entries.push(oldRunEntry('blocked',routes,{active,timeouts:timeoutPolicy()}));
+ await h.events.session_start({},h.ctx);const before=h.controller.state();let prompts=0;
+ h.ctx.ui.select=async()=>{prompts++;};
+ await h.commands.delivery.handler('setup',h.ctx);
+ assert.deepEqual(h.controller.state(),before);assert.equal(prompts,0);assert.equal(h.calls.length,0);
+});
+test('reboot recovery never refunds a previously charged attempt',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{active:{id:'lost',dir:'/gone',stage:'coder',model:routes.coder,budgetMs:900000,startedAt:1000,charged:true},coding:{0:{spentMs:3600000,continuations:1}}}));
+ h.deps.orphanedRunEvidence=()=>({kind:'host-reboot',bootedAt:100000,startedAt:1000});
+ await h.events.session_start({},h.ctx);assert.equal(h.controller.state().coding[0].spentMs,3600000);assert.equal(h.controller.state().active,null);
 });
