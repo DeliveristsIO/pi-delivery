@@ -9,6 +9,8 @@ import {fileURLToPath} from 'node:url';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 const resources=['skills/orchestrate-delivery','skills/security-review','skills/select-task-model','agents/delivery-coder.md','agents/delivery-reviewer.md','agents/delivery-security.md','extensions/delivery'];
 const SUBAGENTS='npm:pi-subagents@0.67.0',SPARK='npm:@adityaaria/spark';
+const FRONTEND='npm:@sentiolabs/pi-frontend-design',OLLAMA='npm:pi-ollama-cloud';
+const SPECS=[SUBAGENTS,SPARK,FRONTEND,OLLAMA];
 
 // pi=<ok|fail-subagents> chooses whether the stubbed package install fails.
 function fixture(t,pi='ok') {
@@ -34,24 +36,26 @@ const installs=calls=>calls.filter(l=>l.includes('|install '));
 test('packages install before linking, once each, in order, with ignore-scripts',t=>{
  const f=fixture(t);ok(f.run(['--skip-verify']));
  const got=installs(f.calls());
- assert.deepEqual(got.map(l=>l.split('|')[1]),[`install ${SUBAGENTS}`,`install ${SPARK}`]);
+ assert.deepEqual(got.map(l=>l.split('|')[1]),SPECS.map(s=>`install ${s}`));
  assert.ok(got.every(l=>l.startsWith('ignore=true|')),'package installs must ignore npm lifecycle scripts');
  for(const p of resources)assert.equal(readlinkSync(join(f.agent,p)),join(f.project,p));
  const r=f.run(['--skip-verify']);ok(r);
  assert.match(r.stdout,/Already installed: npm:pi-subagents/);assert.match(r.stdout,/Already installed: npm:@adityaaria/);
- assert.deepEqual(installs(f.calls()).length,2,'second run installs nothing');
+ assert.match(r.stdout,/Already installed: npm:@sentiolabs/);assert.match(r.stdout,/Already installed: npm:pi-ollama-cloud/);
+ assert.deepEqual(installs(f.calls()).length,SPECS.length,'second run installs nothing');
 });
 
 test('an installed package directory is recognised for scoped names too',t=>{
  const f=fixture(t);mkdirSync(join(f.agent,'npm','spark'),{recursive:true});
  const r=f.run(['--skip-verify']);ok(r);
  assert.match(r.stdout,/Already installed: npm:@adityaaria/);
- assert.deepEqual(installs(f.calls()).map(l=>l.split('|')[1]),[`install ${SUBAGENTS}`]);
+ assert.deepEqual(installs(f.calls()).map(l=>l.split('|')[1]),[SUBAGENTS,FRONTEND,OLLAMA].map(s=>`install ${s}`));
 });
 
 test('check only plans actions and changes nothing',t=>{
  const f=fixture(t);const r=f.run(['--check']);ok(r);
  assert.match(r.stdout,/Would install: npm:pi-subagents/);assert.match(r.stdout,/Would install: npm:@adityaaria/);
+ assert.match(r.stdout,/Would install: npm:@sentiolabs\/pi-frontend-design/);assert.match(r.stdout,/Would install: npm:pi-ollama-cloud/);
  assert.equal(existsSync(f.agent),false,'--check must not create the agent directory');
  assert.equal(existsSync(f.log),false,'--check must not call pi for installs');
  assert.doesNotMatch(r.stdout,/bootstrap finished|restart/i,'a dry run must not claim completion or ask for a restart');
@@ -60,7 +64,7 @@ test('check only plans actions and changes nothing',t=>{
 test('a conflicting delivery path blocks linking but never the packages',t=>{
  const f=fixture(t);const target=join(f.agent,'extensions/delivery');mkdirSync(dirname(target),{recursive:true});writeFileSync(target,'keep');
  const r=f.run(['--skip-verify']);assert.equal(r.status,1,r.stdout+r.stderr);
- assert.deepEqual(installs(f.calls()).map(l=>l.split('|')[1]),[`install ${SUBAGENTS}`,`install ${SPARK}`]);
+ assert.deepEqual(installs(f.calls()).map(l=>l.split('|')[1]),SPECS.map(s=>`install ${s}`));
  assert.equal(existsSync(join(f.agent,'skills')),false,'linking is all-or-nothing');
  assert.match(r.stdout+r.stderr,new RegExp(`Refusing conflicting path: ${target.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}`));
  assert.match(r.stdout+r.stderr,/Conflicting path: /);assert.match(r.stdout+r.stderr,/Remove or move the conflicting path/);

@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PI_SUBAGENTS_SPEC='npm:pi-subagents@0.67.0'
 SPARK_SPEC='npm:@adityaaria/spark'
+FRONTEND_DESIGN_SPEC='npm:@sentiolabs/pi-frontend-design'
+OLLAMA_CLOUD_SPEC='npm:pi-ollama-cloud'
 fail() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
 
 CHECK=0; SKIP_VERIFY=0
@@ -14,7 +16,8 @@ while [[ $# -gt 0 ]]; do
         --skip-verify) SKIP_VERIFY=1; shift ;;
         --help|-h)
             printf '%s\n' 'Usage: bash setup.sh [--check] [--skip-verify]' \
-                'Installs the pinned pi-subagents and SPARK Pi packages, then links this checkout' \
+                'Installs the pinned Pi packages (pi-subagents, SPARK, frontend design' \
+                'and Ollama Cloud), then links this checkout' \
                 '(skills, agent profiles and the delivery extension) through install.sh.' \
                 'Packages install before linking, so a link conflict never blocks installation.' \
                 '--check prints planned actions only: no installs, no links, no verification.' \
@@ -79,6 +82,8 @@ link_resources() {
 STATUS=0
 install_package "$PI_SUBAGENTS_SPEC"
 install_package "$SPARK_SPEC"
+install_package "$FRONTEND_DESIGN_SPEC"
+install_package "$OLLAMA_CLOUD_SPEC"
 link_resources
 if [[ "$CHECK" == 1 ]]; then
     printf '%s\n' 'Check only; nothing was installed, linked or verified.'

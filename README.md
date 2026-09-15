@@ -13,6 +13,7 @@ Licensed under [MIT](LICENSE).
 - Pi coding agent (tested with 0.85.1)
 - pi-subagents 0.67.0 (its RPC contract is version-sensitive)
 - SPARK skills, installed as a Pi package
+- frontend-design and Ollama Cloud skills/providers, installed as Pi packages
 - Bash and GNU coreutils. Linux is tested; on macOS, install GNU `gln` first.
 - Node.js 24+ for tests
 
@@ -32,6 +33,8 @@ To run each step yourself instead:
 # Once, if not already installed in Pi:
 npm_config_ignore_scripts=true pi install npm:pi-subagents@0.67.0
 npm_config_ignore_scripts=true pi install npm:@adityaaria/spark
+npm_config_ignore_scripts=true pi install npm:@sentiolabs/pi-frontend-design
+npm_config_ignore_scripts=true pi install npm:pi-ollama-cloud
 
 bash install.sh --check   # verify no conflicts
 bash install.sh           # create links

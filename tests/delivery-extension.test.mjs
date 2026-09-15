@@ -18,6 +18,19 @@ function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  return {pi,ctx,events,commands,tools,entries,statuses,messages,calls,controller,deps,config};
 }
 const securityPreflightError="Run fan-out: 1/64 used, 63 remaining\nAgent 'delivery-security' was given an implementation task, but its tool allowlist has no mutation-capable tools. Add bash, edit, write, or another mutation-capable tool to the agent, or use a read-only task/agent.";
+test('resume after setup explains how to start without errors or execution',async()=>{
+ const h=harness(),notifications=[];h.ctx.ui.notify=(...args)=>notifications.push(args);
+ await h.events.session_start({},h.ctx);await h.commands.delivery.handler('setup',h.ctx);
+ const before=h.controller.state(),messageCount=h.messages.length,entryCount=h.entries.length;
+ await h.commands.delivery.handler('resume',h.ctx);
+ assert.equal(h.messages.length,messageCount+1);
+ assert.match(h.messages.at(-1).content,/No delivery task has started.*Describe your task normally/);
+ const response=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(response.content[0].text,/No delivery task has started/);
+ assert.doesNotMatch(response.content[0].text,/Recovery started/);
+ assert.deepEqual(h.controller.state(),before);assert.equal(h.entries.length,entryCount);
+ assert.deepEqual(notifications,[]);assert.deepEqual(h.calls,[]);
+});
 async function rejectedSecurity(reason=securityPreflightError) {
  const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']}),rpc=h.deps.rpc;let reject=true;
  h.deps.rpc=async(...args)=>{const r=await rpc(...args);if(reject&&args[1]==='spawn'&&args[2].agent==='delivery-security')throw new Error(reason);return r;};

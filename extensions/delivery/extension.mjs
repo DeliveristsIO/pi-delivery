@@ -261,6 +261,9 @@ export function registerDelivery(pi,schemas,deps={}) {
   }
   async function resumeOwned(taskChecks) {
     if(job)throw new Error('Delivery is already running');
+    if(taskChecks===undefined && s.stage==='planning' && !s.plan && !s.active && !s.pendingContinuation && !s.pendingRetry && !s.resumeStage) {
+      return 'No delivery task has started in this session. Describe your task normally. Reviews run directly; implementation waits for your conversational approval.';
+    }
     config=d.loadConfig(d.configPath());
     if(taskChecks===undefined && rejectedReadOnlyLaunch()) {
       const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts);
@@ -520,7 +523,7 @@ export function registerDelivery(pi,schemas,deps={}) {
           await launchApproved();return;
         }
         if(command==='resume') {
-          await resumeOwned();return;
+          const message=await resumeOwned();if(message)display(message);return;
         }
         if(!command && s.plan) {
           if(job) {display(statusText());return;}
