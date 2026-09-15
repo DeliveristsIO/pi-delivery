@@ -28,3 +28,11 @@ test('native timeout status supplies activity and runner-owned prior logs, not h
   assert.throws(()=>runProgress({id:'wrong',dir}),/identity/);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test('native partial connection failure is terminal even when runner exits successfully',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-partial-'));
+ try {
+  writeFileSync(join(dir,'status.json'),JSON.stringify({runId:'r',state:'partial',error:'Connection error.\nRequired structured output was not produced',startedAt:100,endedAt:137100,steps:[{status:'failed',exitCode:1,model:'p/m',attemptedModels:['p/m']}]}));
+  const p=runProgress({id:'r',dir});assert.equal(p.state,'failed');assert.equal(p.nativeState,'partial');assert.equal(p.durationMs,137000);assert.equal(p.timedOut,false);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});

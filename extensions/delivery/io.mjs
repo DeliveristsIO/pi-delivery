@@ -126,9 +126,9 @@ export function runProgress(active) {
   const s=jsonFile(join(active.dir,'status.json'));
   if(s.runId!==active.id)throw new Error('Run identity mismatch');
   const step=s.steps?.[0] || {};
-  const terminal=['failed','stopped','complete','paused','blocked'].includes(s.state);
+  const terminal=['failed','partial','stopped','complete','paused','blocked'].includes(s.state);
   const end=s.endedAt ?? (terminal?s.lastUpdate:undefined);
-  return {state:s.state,error:typeof s.error==='string'?s.error.slice(0,2000):undefined,model:step.model,attemptedModels:step.attemptedModels,
+  return {state:s.state==='partial'?'failed':s.state,nativeState:s.state,error:typeof s.error==='string'?s.error.slice(0,2000):undefined,model:step.model,attemptedModels:step.attemptedModels,
     timedOut:s.state==='failed' && (s.timedOut===true || step.timedOut===true || /^Subagent timed out after \d+ms\.$/.test(s.error || '')),
     timeoutMs:s.timeoutMs,deadlineAt:s.deadlineAt,startedAt:s.startedAt,
     durationMs:Number.isFinite(end)&&Number.isFinite(s.startedAt)?Math.max(0,end-s.startedAt):undefined,
@@ -139,7 +139,7 @@ export function runProgress(active) {
 export function readOutcome(active) {
   const s=jsonFile(join(active.dir,'status.json'));
   if(s.runId!==active.id) throw new Error('Run identity mismatch');
-  if(['failed','stopped','paused','blocked'].includes(s.state)) throw new Error(`Child ${active.id} ${s.state}; inspect /delivery status and subagent status`);
+  if(['failed','partial','stopped','paused','blocked'].includes(s.state)) throw new Error(`Child ${active.id} ${s.state}; inspect /delivery status and subagent status`);
   if(s.state!=='complete') return null;
   const terminal=join(active.dir,'process-terminal.json');if(!existsSync(terminal)) return null;
   const t=jsonFile(terminal);

@@ -13,7 +13,7 @@ function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const models=[...new Set(Object.values(routes))].map(s=>{const [provider,...id]=s.split('/');return {provider,id:id.join('/')};});
  const ctx={cwd:'/repo',hasUI:true,mode:'tui',isIdle:()=>true,isProjectTrusted:()=>true,modelRegistry:{getAll:()=>models,getAvailable:()=>models},get model(){return model;},sessionManager:{getSessionId:()=> 'session',getBranch:()=>entries},ui:{setStatus:(k,v)=>statuses.push(v),notify:()=>{},confirm:async()=>true,select:async(t,opts)=>opts[0],input:async()=> 'trial'}};
  const pi={on:(e,h)=>events[e]=h,registerCommand:(n,c)=>commands[n]=c,registerTool:t=>tools[t.name]=t,appendEntry:(customType,data)=>entries.push({type:'custom',customType,data:structuredClone(data)}),setModel:async m=>{model=m;return true;},sendMessage:m=>messages.push(m),sendUserMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','edit','write','delivery_plan'],setActiveTools:()=>{},events:{}};
- const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,child:false};
+ const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false};
  const controller=registerDelivery(pi,{plan:{},empty:{}},deps);
  return {pi,ctx,events,commands,tools,entries,statuses,messages,calls,controller,deps,config};
 }
@@ -351,7 +351,7 @@ for(const kind of ['coder','security','unclosed','wrong-model'])test(`failed chi
  const active={id:'failed-child',dir:'/fake',stage,model:routes[stage],budgetMs:312293,continuation:true};
  h.entries.push(oldRunEntry('blocked',routes,{round:1,reason:'Child failed',active,coding:{0:{spentMs:3287707,continuations:1}}}));
  h.deps.isSettled=()=>kind!=='unclosed';
- h.deps.runProgress=()=>({state:'failed',timedOut:false,model:kind==='wrong-model'?'wrong':active.model,attemptedModels:[active.model],durationMs:34000,error:'Connection error.',sessionFiles:['/fake/session.jsonl']});
+ h.deps.runProgress=()=>({state:'failed',timedOut:false,model:kind==='wrong-model'?'wrong':active.model,attemptedModels:[active.model],durationMs:34000,error:'Invalid API key.',sessionFiles:['/fake/session.jsonl']});
  await h.events.session_start({},h.ctx);const before=h.controller.state();
  if(['unclosed','wrong-model'].includes(kind)) {
   await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/closed|model/i);
@@ -359,11 +359,11 @@ for(const kind of ['coder','security','unclosed','wrong-model'])test(`failed chi
  } else {
   const r=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
   assert.match(r.content[0].text,/no execution restarted/i);assert.equal(h.controller.state().active,null);
-  assert.equal(h.controller.state().failedRun.id,'failed-child');assert.equal(h.controller.state().failedRun.error,'Connection error.');
+  assert.equal(h.controller.state().failedRun.id,'failed-child');assert.equal(h.controller.state().failedRun.error,'Invalid API key.');
   assert.equal(h.controller.state().coding[0].spentMs,3287707+(stage==='coder'?34000:0));assert.equal(h.controller.state().coding[0].continuations,1);
   assert.deepEqual(h.controller.state().reports,before.reports);assert.equal(h.controller.state().round,1);
   const retained=h.controller.state();await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/delivery_plan/);assert.deepEqual(h.controller.state(),retained);
-  const text=(await h.tools.delivery_status.execute()).content[0].text;assert.match(text,/Connection error/);assert.match(text,/delivery_plan/);
+  const text=(await h.tools.delivery_status.execute()).content[0].text;assert.match(text,/Invalid API key/);assert.match(text,/delivery_plan/);
   if(stage==='security')assert.match(text,/Do not replay completed coding/);
  }
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
@@ -512,4 +512,86 @@ test('prior run evidence stays in session history and out of the new active repo
  assert.equal(state.priorRun?.reports,1);
  assert.ok(h.entries.some(e=>JSON.stringify(e.data).includes('"runId":"old"')));
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+
+for(const stage of ['coder','spec','quality','security'])test(`connection failure retries only the failed ${stage} on the approved route`,async()=>{
+ const h=harness();let failed=false;
+ h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>{
+  if(a.stage!==stage || failed)return null;
+  failed=true;
+  return {state:'failed',nativeState:'partial',error:'Connection error.\nRequired structured output was not produced',model:a.model,attemptedModels:[a.model],durationMs:1000,sessionFiles:['/fake/prior.jsonl']};
+ };
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);
+ await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const state=h.controller.state(),spawns=h.calls.filter(c=>c.method==='spawn');
+ assert.equal(state.stage,'complete');assert.equal(state.round,0);
+ const attempts=spawns.filter(c=>c.params.model===routes[stage] && c.params.agent===`delivery-${stage==='coder'?'coder':stage==='security'?'security':'reviewer'}`);
+ assert.equal(spawns.length,5);assert.equal(spawns.filter(c=>c.params.agent==='delivery-coder').length,stage==='coder'?2:1);
+ assert.ok(attempts.some(c=>c.params.task.includes('/fake/prior.jsonl')));
+ assert.equal(state.connectionRetries[`0:0:${stage}`].count,1);
+ assert.equal(state.interruptions.length,1);
+});
+for(const scenario of ['exhausted','unclosed','wrong-model','route-change','review-mutation','non-transient'])test(`connection retry boundary: ${scenario}`,async()=>{
+ const h=harness();h.deps.isSettled=()=>scenario!=='unclosed';
+ h.deps.runProgress=a=>{
+  if(scenario==='review-mutation' && a.stage==='coder')return null;
+  if(scenario==='route-change')h.config.routes={...routes,coder:routes.spec};
+  if(scenario==='review-mutation')h.deps.fingerprint=()=> 'mutated';
+  return {state:'failed',error:scenario==='non-transient'?'Invalid API key.':'Connection error.',model:scenario==='wrong-model'?'other/model':a.model,attemptedModels:[a.model],durationMs:1000,sessionFiles:[]};
+ };
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);
+ await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const state=h.controller.state();assert.equal(state.stage,'blocked');
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,scenario==='exhausted'?3:scenario==='review-mutation'?2:1);
+ if(scenario==='exhausted'){assert.equal(state.coding[0].spentMs,3000);assert.equal(state.connectionRetries['0:0:coder'].count,2);assert.equal(state.active,null);}
+});
+test('retained failed connection recovers through resume without another approval',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active:{id:'old',dir:'/fake',stage:'coder',model:routes.coder,budgetMs:2700000,startedAt:0}}));
+ h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>a.id==='old'?{state:'failed',error:'Connection error.',model:a.model,attemptedModels:[a.model],durationMs:137000,sessionFiles:['/fake/old.jsonl']}:null;
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected approval');};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.equal(h.controller.state().connectionRetries['0:0:coder'].count,1);
+});
+test('pending connection retry survives restart and retains retry ceiling and remaining budget',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{round:0,timeouts:timeoutPolicy(),pendingRetry:{stage:'coder',budgetMs:5000,notBefore:0,continuation:false},connectionRetries:{'0:0:coder':{count:2,spentMs:2000}},coding:{0:{spentMs:2000,continuations:0}}}));
+ h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>({state:'failed',error:'Connection error.',model:a.model,attemptedModels:[a.model],durationMs:1000,sessionFiles:[]});
+ await h.events.session_start({},h.ctx);await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ const spawns=h.calls.filter(c=>c.method==='spawn');assert.equal(spawns.length,1);assert.equal(spawns[0].params.timeoutMs,5000);
+ assert.equal(h.controller.state().stage,'blocked');assert.equal(h.controller.state().coding[0].spentMs,3000);
+});
+test('connection failure cannot extend an exhausted review budget',async()=>{
+ const h=harness();h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>a.stage==='spec'?{state:'failed',error:'Connection error.',model:a.model,attemptedModels:[a.model],durationMs:a.budgetMs,sessionFiles:[]}:null;
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'blocked');assert.equal(h.calls.filter(c=>c.method==='spawn').length,2);
+});
+
+for(const choice of ['accept','decline','no-ui','state-change'])test(`bare delivery offers retained recovery: ${choice}`,async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active:{id:'old',dir:'/fake',stage:'coder',model:routes.coder,budgetMs:2700000,startedAt:0}}));
+ h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>a.id==='old'?{state:'failed',error:'Connection error.',model:a.model,attemptedModels:[a.model],durationMs:1000,sessionFiles:[]}:null;
+ await h.events.session_start({},h.ctx);const before=h.controller.state();let confirmations=0;
+ h.ctx.hasUI=choice!=='no-ui';
+ h.ctx.ui.confirm=async(title,text)=>{confirmations++;assert.match(title,/Resume retained delivery/);assert.match(text,/Fixture/);assert.match(text,/Task 1\/1/);if(choice==='state-change')await h.commands.delivery.handler('off',h.ctx);return choice!=='decline';};
+ await h.commands.delivery.handler('',h.ctx);await h.controller.settled();
+ assert.equal(confirmations,choice==='no-ui'?0:1);
+ if(choice==='accept'){assert.equal(h.controller.state().stage,'complete');assert.equal(h.controller.state().connectionRetries['0:0:coder'].count,1);}
+ else {assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);if(choice!=='state-change')assert.deepEqual(h.controller.state(),before);}
+});
+for(const stage of ['awaiting-approval','blocked','complete'])test(`bare delivery preserves ${stage} plan and evidence`,async()=>{
+ const h=harness();h.entries.push(oldRunEntry(stage,routes));await h.events.session_start({},h.ctx);
+ const before=h.controller.state();h.ctx.ui.confirm=async()=>{throw new Error('Unexpected resume prompt');};
+ await h.commands.delivery.handler('',h.ctx);assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('bare delivery reports a running worker without prompting or replacing it',async()=>{
+ const h=harness();let release;h.deps.readOutcome=()=>null;
+ const rpc=h.deps.rpc;h.deps.rpc=async(...args)=>{const r=await rpc(...args);if(args[1]==='status')await new Promise(resolve=>{release=resolve;});return r;};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);
+ while(!release)await new Promise(r=>setImmediate(r));
+ const before=h.controller.state();h.ctx.ui.confirm=async()=>{throw new Error('Unexpected prompt');};
+ await h.commands.delivery.handler('',h.ctx);assert.deepEqual(h.controller.state(),before);
+ await h.events.session_shutdown();release();await h.controller.settled();
 });

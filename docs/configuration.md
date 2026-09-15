@@ -23,3 +23,11 @@ This is a timeout fragment, not a complete configuration. Each value must be a w
 Task commands belong in `tasks[].checks`; whole-change release gates belong in top-level `checks`. Multi-task implementation plans require per-task checks. Commands run with the user's permissions; executable/syntax validation is not a shell sandbox.
 
 Git and remote issue-action configuration is not implemented yet. Do not add speculative keys expecting them to grant permissions.
+
+## Model connection recovery
+
+Delivery treats native `partial` runs as failed attempts, including cases where the runner itself exits successfully. Once process closure and exact model identity are confirmed, recognized connection errors retry automatically on the same approved route after 5 and 10 seconds, at most twice per task, review round and stage. No additional approval is needed. Authentication errors, unknown failures and uncertain launches are not automatically retried.
+
+Retries preserve partial files and prior session logs, rerun the required review/check sequence, and consume the existing time allowance. Review retries share the original review budget; coder retries share the task coding budget. Retry counts and pending retries survive session reloads. After restarting Pi, enter `/delivery`. It detects retained work and offers a confirmation to resume; `/delivery resume` remains available as a direct command. Declining preserves the run. If a worker is already running, `/delivery` shows its status without starting another worker. No model substitution or automatic commit occurs.
+
+An already running Pi process must reload the extension (or restart with `pi --continue`) to use an updated checkout.
