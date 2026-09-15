@@ -31,3 +31,7 @@ Delivery treats native `partial` runs as failed attempts, including cases where 
 Retries preserve partial files and prior session logs, rerun the required review/check sequence, and consume the existing time allowance. Review retries share the original review budget; coder retries share the task coding budget. Retry counts and pending retries survive session reloads. After restarting Pi, enter `/delivery`. It detects retained work and offers a confirmation to resume; `/delivery resume` remains available as a direct command. Declining preserves the run. If a worker is already running, `/delivery` shows its status without starting another worker. No model substitution or automatic commit occurs.
 
 An already running Pi process must reload the extension (or restart with `pi --continue`) to use an updated checkout.
+
+## Planning questions
+
+The planning agent can ask focused questions in conversation before submitting a plan when requirements are unclear. It first checks repository context and prior decisions, then waits for answers to material questions. Answers inform the proposal; execution approval is requested after the resolved plan is shown. No special question command is needed.

@@ -13,6 +13,14 @@ Read repository instructions and relevant project memory. Resolve genuine scope 
 
 If delivery tools are missing, request installation and a full Pi restart after workers settle. Do not pretend workers ran. `/delivery setup` selects exact routes and obtains provider-context consent. Never silently substitute models.
 
+## Clarify during planning
+
+Ask the user in normal conversation when missing information materially affects scope, expected behavior, acceptance criteria or implementation choices. First inspect available repository context and prior answers. Do not ask again about settled decisions.
+
+Ask one focused question at a time, with concrete options when useful. Wait for the answer before finalizing the affected plan details; independent read-only investigation can continue. Do not guess requirements or submit a plan simply to avoid asking. When requirements are already clear, proceed directly to the proposal.
+
+A clarification answer supplies requirements, not execution approval. Incorporate it into the plan, show the resolved proposal and then obtain approval for that proposal.
+
 ## Propose and execute
 
 - For a new proposal, call `delivery_plan` with coherent tasks, acceptance criteria, file scope and executable checks. Put current-task checks in `tasks[].checks` and release gates in top-level `checks`.
