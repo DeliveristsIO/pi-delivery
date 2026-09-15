@@ -1,0 +1,37 @@
+{
+  "name": "pi-delivery",
+  "version": "0.1.0",
+  "description": "Approved, model-routed development and independent review for Pi",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check:privacy": "node scripts/check-release.mjs --privacy-only",
+    "check:release": "node scripts/check-release.mjs"
+  },
+  "files": [
+    "extensions/delivery/index.ts",
+    "extensions/delivery/extension.mjs",
+    "extensions/delivery/policy.mjs",
+    "extensions/delivery/io.mjs",
+    "extensions/delivery/rpc.mjs",
+    "extensions/delivery/setup.mjs",
+    "agents/delivery-coder.md",
+    "agents/delivery-reviewer.md",
+    "agents/delivery-security.md",
+    "skills/orchestrate-delivery/SKILL.md",
+    "skills/security-review/SKILL.md",
+    "skills/select-task-model/SKILL.md",
+    "setup.sh",
+    "install.sh",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "docs/configuration.md",
+    "docs/roadmap.md",
+    "docs/releasing.md",
+    "LICENSE"
+  ]
+}

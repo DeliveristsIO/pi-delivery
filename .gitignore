@@ -1,0 +1,13 @@
+.spark/
+__pycache__/
+*.pyc
+node_modules/
+.env
+.env.*
+auth.json
+credentials.json
+delivery.json
+settings.json
+*.jsonl
+*.log
+*.tgz
