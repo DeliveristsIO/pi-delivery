@@ -68,7 +68,7 @@ export function registerDelivery(pi,schemas,deps={}) {
     const total=s.timeouts?.coderMs+s.timeouts?.continuationMs;
     return s.stage==='blocked' && /^Fix\/review round limit exhausted/.test(s.reason) &&
       !job && !s.active && !s.pendingContinuation && !s.pendingRetry && !s.resumeStage &&
-      s.plan?.mode!=='review' && configured.maxFixRounds>bound && Number.isFinite(total) && spent<total;
+      s.plan?.mode!=='review' && s.correctionPolicy?.source!=='confirmed-extension' && configured.maxFixRounds>bound && Number.isFinite(total) && spent<total;
   }
   function roundLimitExhausted() {
     return s.stage==='blocked' && /^Fix\/review round limit exhausted/.test(s.reason) &&
@@ -475,6 +475,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       if(JSON.stringify({routes:config.routes,timeouts:config.timeouts,corrections:config.corrections})!==configuration)throw new Error('Correction extension configuration changed during approval');
       if(!correctionExtensionAvailable() || snapshot()!==baseline)throw new Error('Workspace or correction state changed during approval');
       s.correctionPolicy={...configured,source:'confirmed-extension'};
+      s.round=Math.max(s.round,bound)+1;
       s.stage='coder';s.reason='';s.feedback=JSON.stringify(latest?.report || {});s.active=null;save();start();return 'Correction bound extended with confirmation; retained task, plan, routes, checks, reports and coding budget preserved.';
     }
     if(taskChecks===undefined && roundLimitExhausted())return statusText();

@@ -225,14 +225,30 @@ test('final correction exhaustion stops without proposing another plan',async()=
  assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
 
-test('legacy exhausted plan adopts configured limit without replacement plan',async()=>{
+test('legacy exhausted plan adopts configured limit and starts the next rework round',async()=>{
  const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
- h.entries.push(oldRunEntry('blocked',routes,{round:2,reason:'Fix/review round limit exhausted (2)',correctionPolicy:undefined}));
+ h.entries.push(oldRunEntry('blocked',routes,{round:2,reason:'Fix/review round limit exhausted (2)',correctionPolicy:undefined,reports:[
+  {stage:'coder',task:0,round:1,snapshot:'hash',runId:'old-1',report:{status:'changes_requested',summary:'still needs work',findings:['one']}},
+  {stage:'coder',task:0,round:2,snapshot:'hash',runId:'old-2',report:{status:'changes_requested',summary:'still needs work',findings:['two']}}
+ ]}));
  await h.events.session_start({},h.ctx);const before=h.controller.state();
  await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
  const state=h.controller.state();
- assert.deepEqual(state.correctionPolicy,{maxFixRounds:4,source:'confirmed-extension'});assert.ok(state.round>=before.round);
- assert.deepEqual(state.plan,before.plan);assert.deepEqual(state.routes,before.routes);assert.ok(state.reports.some(r=>r.runId==='old'));
+ assert.deepEqual(state.correctionPolicy,{maxFixRounds:4,source:'confirmed-extension'});assert.equal(state.round,3);assert.equal(before.round,2);
+ assert.deepEqual(state.plan,before.plan);assert.deepEqual(state.routes,before.routes);assert.ok(state.reports.some(r=>r.runId==='old-2'));
+ const coderReports=state.reports.filter(r=>r.stage==='coder');
+ assert.equal(coderReports.at(-1).round,3);assert.ok(coderReports.filter(r=>r.round>0).length<=4);
+});
+
+test('confirmed correction extension cannot be adopted again',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:6},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{round:4,reason:'Fix/review round limit exhausted (4)',correctionPolicy:{maxFixRounds:4,source:'confirmed-extension'}}));
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ const status=await h.tools.delivery_status.execute();
+ assert.equal(status.details.nextAction.action,'inspect');
+ const result=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(result.content[0].text,/approved correction bound is exhausted|inspect/i);assert.deepEqual(h.controller.state(),before);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
 
 test('declined correction extension preserves exhausted state',async()=>{
