@@ -23,6 +23,16 @@ This is a timeout fragment, not a complete configuration. Each value must be a w
 
 Task commands belong in `tasks[].checks`; whole-change release gates belong in top-level `checks`. Multi-task implementation plans require per-task checks. Commands run with the user's permissions; executable/syntax validation is not a shell sandbox.
 
+The temporary version-1 correction setting is:
+
+```json
+{
+  "corrections": { "maxFixRounds": 4 }
+}
+```
+
+`maxFixRounds` accepts integers `0..8`. The default is `4` for new plans; older retained plans remain at `2` until explicit migration. Phase 2 will move this setting into profiles while preserving this migration behavior.
+
 Git and remote issue-action configuration is not implemented yet. Do not add speculative keys expecting them to grant permissions.
 
 ## Model connection recovery

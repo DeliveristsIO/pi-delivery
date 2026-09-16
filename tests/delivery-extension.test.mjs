@@ -600,6 +600,29 @@ test('approval preview is readable rather than a JSON object dump',async()=>{
  await h.commands.delivery.handler('approve',h.ctx);
  assert.match(body,/Tasks/);assert.match(body,/node --test/);assert.doesNotMatch(body,/"tasks"\s*:/);
 });
+test('new proposal binds four correction rounds and shows them before approval',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);
+ assert.deepEqual(h.controller.state().correctionPolicy,{maxFixRounds:4,source:'default'});
+ assert.match(h.messages.at(-1).content,/up to 4 coder rework rounds/i);
+});
+test('configured correction limit changes pending approval identity',async()=>{
+ const h=harness();h.config.corrections={maxFixRounds:3};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);
+ await h.events.input({text:'approve',source:'interactive'},h.ctx);
+ h.config.corrections={maxFixRounds:4};
+ await assert.rejects(h.tools.delivery_execute.execute('e',{},null,null,h.ctx),/correction.*changed|reapproval/i);
+});
+test('reloaded approval preserves the correction policy bound to the proposal',async()=>{
+ const first=harness({version:1,routes,corrections:{maxFixRounds:3},repos:['/repo']});
+ await first.events.session_start({},first.ctx);await first.tools.delivery_plan.execute('p',plan,null,null,first.ctx);
+ const reloaded=harness(structuredClone(first.config));reloaded.entries.push(...structuredClone(first.entries));
+ await reloaded.events.session_start({},reloaded.ctx);
+ assert.deepEqual(reloaded.controller.state().correctionPolicy,{maxFixRounds:3,source:'configured'});
+ await reloaded.events.input({text:'approve',source:'interactive'},reloaded.ctx);
+ await reloaded.tools.delivery_execute.execute('e',{},null,null,reloaded.ctx);await reloaded.controller.settled();
+ assert.deepEqual(reloaded.controller.state().correctionPolicy,{maxFixRounds:3,source:'configured'});
+});
 const supervisorRequestEntry=(runId='owned',agent='delivery-coder',childIndex=0,id='request-1')=>({type:'custom_message',customType:'subagent_supervisor_request',details:{id,requestId:id,runId,agent,childIndex}});
 for (const hasUI of [true, false]) test(`active supervisor replies are informational without a confirmation prompt (${hasUI ? 'UI' : 'no UI'})`,async()=>{
  const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder,agent:'delivery-coder',childIndex:0}}),supervisorRequestEntry());

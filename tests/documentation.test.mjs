@@ -19,3 +19,14 @@ test('public documentation relative links resolve',()=>{
   }
  }
 });
+test('configuration documentation defines the version-1 correction policy migration',()=>{
+ const configuration=readFileSync(resolve(root,'docs/configuration.md'),'utf8');
+ const readme=readFileSync(resolve(root,'README.md'),'utf8');
+ for(const text of [configuration,readme]) {
+  assert.match(text, /"corrections"\s*:\s*\{\s*"maxFixRounds"\s*:\s*4\s*\}/);
+  assert.match(text, /integers?\s+`?0\.\.8`?/i);
+  assert.match(text, /default\s+(?:is\s+)?`?4`?\s+for\s+new\s+plans/i);
+  assert.match(text, /older\s+retained\s+plans?.*2.*(?:explicit|migration)/i);
+  assert.match(text, /Phase\s+2.*profiles.*migration/i);
+ }
+});

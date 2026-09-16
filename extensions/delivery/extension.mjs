@@ -1,6 +1,6 @@
 import {join} from 'node:path';
 import {accessSync,constants} from 'node:fs';
-import {ROLES,ASTRA,AGENTS,REPORT_SCHEMA,catalog,validateRoutes,validatePlan,initialState,approve,advance,parentToolAllowed,timeoutPolicy,attemptBudget,allChecks,checksForTask,repairCheckScopes} from './policy.mjs';
+import {ROLES,ASTRA,AGENTS,REPORT_SCHEMA,catalog,validateRoutes,validatePlan,initialState,approve,advance,parentToolAllowed,timeoutPolicy,attemptBudget,allChecks,checksForTask,repairCheckScopes,correctionPolicy,fixRoundLimit} from './policy.mjs';
 import * as io from './io.mjs';
 import {rpc} from './rpc.mjs';
 import {ROLE_HELP,modelLabel} from './setup.mjs';
@@ -22,13 +22,14 @@ export function registerDelivery(pi,schemas,deps={}) {
     if(plan?.sourcePlan && d.readPlan(root,plan.sourcePlan.path).hash!==plan.sourcePlan.hash)throw new Error('Source plan changed; read the updated document and obtain fresh execution approval.');
     return d.fingerprint(root,{scope:plan?.tasks.flatMap(t=>t.files) || [],commands:allChecks(plan),warnings});
   }
-  const planKey=()=>JSON.stringify({plan:s.plan,snapshot:s.snapshot});
+  const planKey=()=>JSON.stringify({plan:s.plan,snapshot:s.snapshot,correctionPolicy:s.correctionPolicy});
   function readablePlan(routes) {
     const p=s.plan;
     return [p.title,`Workspace: ${root}`,`Mode: ${p.mode==='review'?'Read-only review — no fixes':'Implementation'}`,
       p.reviewRange?`Commits: ${p.reviewRange.base.slice(0,10)}..${p.reviewRange.head.slice(0,10)}`:'',
       p.sourcePlan?`Source plan: ${p.sourcePlan.path}`:'',
       ...(s.coverageWarnings || []).map(w=>`Coverage warning: ${w}`),
+      `Correction budget: up to ${fixRoundLimit(s)} coder rework rounds per task within the existing cumulative coding-time allowance.`,
       'Tasks',...p.tasks.map((t,i)=>`${i+1}. ${t.title}\n   ${t.instructions}\n   Files: ${t.files.join(', ')}\n   Acceptance: ${t.acceptance.join('; ')}\n   Task checks: ${(t.checks || (p.tasks.length===1?p.checks:[])).join('; ')}`),
       `Time budget: coder ${timeoutPolicy(config.timeouts).coderMs/60000}m + one ${timeoutPolicy(config.timeouts).continuationMs/60000}m continuation per task; reviewers ${timeoutPolicy(config.timeouts).reviewMs/60000}m per run.`,
       p.mode==='review'?'Validation commands':'Final/release test commands',...(p.checks.length?p.checks.map(c=>`  ${c}`):['  None — static review only; no test pass will be claimed.']),
@@ -42,15 +43,18 @@ export function registerDelivery(pi,schemas,deps={}) {
     refreshConfig();
     const routes=routeCheck(),hash=snapshot();
     if(hash!==s.snapshot)throw new Error('Workspace changed since proposal; refresh the plan first');
+    const corrections=correctionPolicy(config.corrections);
+    const boundCorrections=s.correctionPolicy || correctionPolicy({},true);
+    if(JSON.stringify(corrections)!==JSON.stringify(boundCorrections))throw new Error('Correction policy changed; reapproval required');
     d.validateCommands(root,allChecks(s.plan));
-    return {routes,hash,timeouts:timeoutPolicy(config.timeouts)};
+    return {routes,hash,timeouts:timeoutPolicy(config.timeouts),corrections};
   }
   async function launchApproved() {
-    const {routes,hash,timeouts}=pendingExecution();
+    const {routes,hash,timeouts,corrections}=pendingExecution();
     await d.rpc(pi.events,'ping');
     if(hash!==snapshot())throw new Error('Workspace changed before execution');
     const warnings=s.coverageWarnings || [];
-    s=approve(s,routes,hash);s.coverageWarnings=warnings;s.timeouts=timeouts;approvalTurn=null;fileIntent=null;save();start();
+    s=approve(s,routes,hash);s.coverageWarnings=warnings;s.timeouts=timeouts;s.correctionPolicy=corrections;approvalTurn=null;fileIntent=null;save();start();
   }
   function display(text) {pi.sendMessage({customType:'delivery',content:text,display:true});}
   function status() {
@@ -586,10 +590,11 @@ export function registerDelivery(pi,schemas,deps={}) {
       }
       const coverageWarnings=[],hash=snapshot(plan,coverageWarnings);
       const timeouts=timeoutPolicy(config.timeouts);
+      const corrections=correctionPolicy(config.corrections);
       const fileApproved=fileIntent && plan.sourcePlan?.path===fileIntent.path && plan.sourcePlan.hash===fileIntent.hash;
       if(fileApproved && (hash!==fileIntent.snapshot || JSON.stringify(proposalRoutes)!==JSON.stringify(fileIntent.routes) || JSON.stringify(timeouts)!==JSON.stringify(fileIntent.timeouts)))throw new Error('Workspace or routes changed since the file execution request; refresh approval.');
       const priorRun=s.plan && !s.active && (s.reports||[]).length?{stage:s.stage,task:s.task,round:s.round,reports:s.reports.length}:null;
-      s={...initialState(),enabled:true,plan,coverageWarnings,timeouts,routes:proposalRoutes,stage:'awaiting-approval',snapshot:hash,priorRun};approvalTurn=null;save();
+      s={...initialState(),enabled:true,plan,coverageWarnings,timeouts,routes:proposalRoutes,correctionPolicy:corrections,stage:'awaiting-approval',snapshot:hash,priorRun};approvalTurn=null;save();
       display(readablePlan(config.routes));
       if(fileApproved && params.start!==false) {
         await launchApproved();
