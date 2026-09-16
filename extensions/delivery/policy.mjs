@@ -95,6 +95,20 @@ export function attemptBudget(policy,stage,spentMs=0,continuation=false) {
   check(budget>0,'Coding task budget exhausted; a new budget needs explicit approval');
   return budget;
 }
+export function correctionPolicy(input={},legacy=false) {
+  check(input && typeof input==='object' && !Array.isArray(input),'Invalid correction policy');
+  for(const key of Object.keys(input))check(key==='maxFixRounds',`Unknown correction policy setting: ${key}`);
+  const maxFixRounds=input.maxFixRounds ?? (legacy?2:4);
+  check(Number.isInteger(maxFixRounds) && maxFixRounds>=0 && maxFixRounds<=8,'Invalid maxFixRounds');
+  return {maxFixRounds,source:legacy?'legacy':input.maxFixRounds===undefined?'default':'configured'};
+}
+export function fixRoundLimit(state) {
+  const policy=state?.correctionPolicy;
+  if(!policy)return correctionPolicy({},true).maxFixRounds;
+  check(policy && typeof policy==='object' && !Array.isArray(policy),'Invalid correction policy');
+  for(const key of Object.keys(policy))check(key==='maxFixRounds' || key==='source',`Unknown correction policy setting: ${key}`);
+  return correctionPolicy({maxFixRounds:policy.maxFixRounds}).maxFixRounds;
+}
 export function initialState() {
   return {version:1,enabled:false,stage:'planning',task:0,round:0,plan:null,routes:null,snapshot:null,active:null,reports:[],feedback:'',reason:''};
 }
@@ -117,7 +131,10 @@ export function advance(state, report, snapshot) {
   if(report.status==='blocked') return {...s,stage:'blocked',reason:report.summary};
   if(report.status==='changes_requested') {
     if(s.plan.mode==='review')return {...s,stage:'blocked',reason:'Read-only validation found issues; fixes require a separate approved implementation plan.'};
-    if(s.round>=2) return {...s,stage:'blocked',reason:'Two fix/review rounds exhausted'};
+    if(s.round>=fixRoundLimit(s)) {
+      const limit=fixRoundLimit(s);
+      return {...s,stage:'blocked',reason:`Fix/review round limit exhausted (${limit})`};
+    }
     return {...s,stage:'coder',round:s.round+1,feedback:JSON.stringify(report)};
   }
   if(s.stage==='coder') s.stage='checks';

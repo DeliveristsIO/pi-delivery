@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes } from '../extensions/delivery/policy.mjs';
+import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, correctionPolicy, fixRoundLimit } from '../extensions/delivery/policy.mjs';
 
 export const routes = { planning: 'openai-codex/gpt-6-astra', coder: 'ollama-cloud/coder', spec: 'anthropic/reviewer', quality: 'anthropic/reviewer', security: 'openai-codex/reviewer' };
 export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: 'Implement fixture', files: ['src/a.js'], checks: ['node --test'], acceptance: ['Works'] }], checks: ['node --test'], risk: 'low', security: true };
@@ -65,6 +65,31 @@ test('fixes rerun every review; retry bound blocks repeated findings', () => {
   s=advance(s,bad,'tree'); assert.equal(s.stage,'coder'); assert.equal(s.round,1);
   s.stage='quality'; s=advance(s,bad,'tree'); assert.equal(s.round,2);
   s.stage='quality'; s=advance(s,bad,'tree'); assert.equal(s.stage,'blocked');
+});
+test('new correction policy permits four rework rounds after the initial attempt',()=>{
+  const p=correctionPolicy();
+  assert.deepEqual(p,{maxFixRounds:4,source:'default'});
+  let s={...approve({...initialState(),plan,stage:'awaiting-approval'},routes,'tree'),correctionPolicy:p,stage:'quality'};
+  const bad={status:'changes_requested',summary:'bug',findings:['a:1 fix']};
+  for(let expected=1;expected<=4;expected++) {
+    s=advance(s,bad,'tree');
+    assert.equal(s.stage,'coder');assert.equal(s.round,expected);
+    s.stage='quality';
+  }
+  s=advance(s,bad,'tree');
+  assert.equal(s.stage,'blocked');assert.match(s.reason,/round limit.*4/i);
+});
+test('retained state without correction policy keeps two-round contract',()=>{
+  assert.equal(fixRoundLimit({}),2);
+});
+test('correction policy rejects unsafe limits',()=>{
+  for(const maxFixRounds of [-1,1.5,9])assert.throws(()=>correctionPolicy({maxFixRounds}),/maxFixRounds/);
+});
+test('blocked reports stop without incrementing the fix round',()=>{
+  const s={...approve({...initialState(),plan,stage:'awaiting-approval'},routes,'tree'),stage:'quality',round:3};
+  const blocked=advance(s,{status:'blocked',summary:'host unavailable',findings:[]},'tree');
+  assert.equal(blocked.stage,'blocked');
+  assert.equal(blocked.round,3);
 });
 test('high risk plans cannot skip security', () => {
   assert.equal(validatePlan({...plan,risk:'high',security:false}).security,true);

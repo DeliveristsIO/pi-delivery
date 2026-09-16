@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {validatePlan,allChecks,checksForTask,repairCheckScopes} from '../extensions/delivery/policy.mjs';
+import {validatePlan,allChecks,checksForTask,repairCheckScopes,fixRoundLimit} from '../extensions/delivery/policy.mjs';
 import {fingerprint} from '../extensions/delivery/io.mjs';
 import {mkdtempSync,writeFileSync,rmSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -39,6 +39,7 @@ test('scope correction preserves final gates, evidence, and spent coding budget'
  const s=legacy(),fixed=repairCheckScopes(s,mapping);
  assert.deepEqual(fixed.plan.checks,s.plan.checks);assert.deepEqual(fixed.reports,s.reports);assert.deepEqual(fixed.coding,s.coding);
  assert.equal(fixed.stage,'checks');assert.equal(fixed.round,0);assert.equal(fixed.checkScopeRecovery.creditedRounds,2);
+ assert.equal(fixRoundLimit(fixed),2);
  assert.equal(s.round,2);assert.equal(s.plan.tasks[0].checks,undefined);
  assert.throws(()=>repairCheckScopes({...fixed,stage:'blocked'},mapping),/legacy/);
 });
