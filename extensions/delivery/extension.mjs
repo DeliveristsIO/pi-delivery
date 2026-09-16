@@ -13,6 +13,8 @@ class OwnedRunBusy extends Error {}
 
 export function registerDelivery(pi,schemas,deps={}) {
   if(deps.child ?? process.env.PI_SUBAGENT_CHILD==='1') return;
+  const suppliedWorkingTreeEvidence=typeof deps.workingTreeEvidence==='function';
+  const suppliedDiff=typeof deps.diff==='function';
   for(const [k,v] of Object.entries({...io,rpc,pollMs:1500,retryDelayMs:5000,now:Date.now})) if(!(k in deps)) deps[k]=v;
   const d=deps;
   let s=initialState(),ctx,root,config,originalTools,job=null,closed=false,checking,requestText='',approvalTurn=null,fileIntent=null;
@@ -87,10 +89,22 @@ export function registerDelivery(pi,schemas,deps={}) {
     }
     return lines.join('\n');
   }
+  function blockedReviewReport() {
+    if(s.stage!=='blocked' || !s.plan)return null;
+    const latest=s.reports.filter(r=>r.task===s.task).at(-1);
+    return latest && ['spec','quality','security'].includes(latest.stage) && latest.report?.status==='blocked' ? latest : null;
+  }
+  function blockedReviewRecovery() {
+    const recovery=blockedReviewReport();
+    if(!recovery || job || s.active || s.pendingRetry || s.pendingContinuation || s.resumeStage)return null;
+    try {if(snapshot()!==s.snapshot)return null;} catch {return null;}
+    return recovery;
+  }
   function nextAction() {
     if(!s.enabled)return {action:'activate',message:'Activate /delivery to begin.'};
     if(job)return {action:'monitor',message:'Execution is running. Use delivery_status; do not call setup, resume or execute. For a running coder, delivery_steer can request current-task verification.'};
     if(s.active || s.pendingContinuation || s.pendingRetry || s.resumeStage)return {action:'resume',message:'Call delivery_resume to reconcile retained execution. Do not replace its plan or change routes yet.'};
+    if(blockedReviewRecovery())return {action:'resume',message:'Call delivery_resume to retry the evidence-blocked reviewer at the same stage. The workspace, task, round, routes and prior blocked report are preserved; no coder replay is launched.'};
     if(terminalCorrection())return {action:'plan',message:'Call delivery_plan with a corrective plan from retained context. Setup is unnecessary unless you want different models; use delivery_configure for explicit route changes.'};
     if(s.stage==='awaiting-approval')return {action:'approve',message:'The displayed plan awaits conversational approval. After approval, call delivery_execute. Do not repeat setup or resume.'};
     if(s.stage==='complete')return {action:'complete',message:'Execution completed. Report the recorded checks and reviews.'};
@@ -177,8 +191,21 @@ export function registerDelivery(pi,schemas,deps={}) {
     const task=s.plan.tasks[s.task];
     const recovering=s.pendingContinuation || s.active?.continuation || (s.interruptions || []).some(r=>r.task===s.task && r.error);
     const scope={title:s.plan.title,mode:s.plan.mode || 'implementation',approvedRoutes:s.routes,sourcePlan:s.plan.sourcePlan,coverageWarnings:s.coverageWarnings,reviewRange:s.plan.reviewRange,taskIndex:s.task,task,interruptions:(s.interruptions || []).filter(r=>r.task===s.task),completedTasks:s.plan.tasks.slice(0,s.task),checks:s.plan.mode==='review'?s.plan.checks:checksForTask(s.plan,s.task),finalChecks:s.plan.checks};
+    const workingEvidence=(paths)=>suppliedWorkingTreeEvidence || !suppliedDiff
+      ? d.workingTreeEvidence(root,paths)
+      : d.diff(root);
+    const evidence=stage==='spec' && !s.plan.reviewRange
+      ? workingEvidence(task.files)
+      : (stage==='quality' || stage==='security') && !s.plan.reviewRange
+        ? workingEvidence()
+        : d.diff(root,s.plan.reviewRange);
+    const reviewScope=stage==='spec'
+      ? 'Review evidence is the exact current-task diff and path-scoped tracked/untracked status. Inspect only the current task for acceptance; accepted prior-task changes are preserved baseline unless actual-source inspection demonstrates a regression affecting current acceptance. Do not block because earlier task files are not included.'
+      : stage==='quality' || stage==='security'
+        ? 'Review evidence is aggregate. Use available read and bash tools to inspect the complete workspace; run git diff --no-ext-diff -- <path> for clipped or important files. Do not block solely because embedded evidence is truncated; actual source and repository-local git commands can complete the approved scope. Block only when evidence is genuinely inaccessible or material uncertainty remains.'
+        : '';
     return [
-      stage==='coder'?'Implement only this approved task. Follow selected SPARK TDD/debugging/verification skills.':`Read-only review. Do not modify any files. Independent ${stage} review. Inspect actual source and the full current diff for current-task acceptance and earlier-task regressions. Later task deliverables are not required yet. No edits or commands.`,
+      stage==='coder'?'Implement only this approved task. Follow selected SPARK TDD/debugging/verification skills.':`Read-only review. Do not modify any files. Independent ${stage} review. Inspect actual source and the approved review evidence for current-task acceptance and earlier-task regressions. Later task deliverables are not required yet.`,
       stage==='coder' && recovering?'Recovery priority: after reading applicable repository instructions, run the approved current-task checks on the existing work: '+JSON.stringify(checksForTask(s.plan,s.task))+'. Use actual failures to target inspection and fixes. Avoid repeating broad repository discovery. The remaining budget includes verification; report exact command results and unresolved failures before it ends.':'',
       'No commit, push, merge, deploy, credentials access or delegation. Preserve unrelated changes. Stop for scope questions; do not widen scope.',
       'Return your result using the supplied structured_output schema. status=approved requires findings=[]; put successful checks, completed work and informational evidence in summary, never in findings. Use changes_requested for actionable fixes; blocked for missing evidence. findings are concise strings with severity, file:line, evidence, impact and fix. This schema replaces prose/fenced/JSON-only report formatting from role skills.',
@@ -189,8 +216,9 @@ export function registerDelivery(pi,schemas,deps={}) {
       'Uncovered symlink targets are not dependencies you may silently use. Stop if this task needs one. Do not delete or repair unrelated links.',
       s.feedback?'Prior actionable findings: '+s.feedback:'',
       recovering?`Continue the same approved task from its partial changes. Start with verification of the partial workspace, inspect the previous tool logs, and finish only remaining work. Do not discard or reimplement completed work. Previous interrupted runs: ${JSON.stringify((s.interruptions || []).filter(r=>r.task===s.task))}`:'',
-      stage==='coder'?'':d.diff(root,s.plan.reviewRange),
-      s.plan.mode==='review'?`Read-only validation: report findings only. Do not implement or fix anything. For a committed range, untracked files are out of scope. Read the FULL diff in chunks from ${d.reviewPatch(root,s.plan.reviewRange)}; the inline preview may be truncated.`:'',
+      stage==='coder'?'':evidence,
+      stage==='coder'?'':reviewScope,
+      s.plan.mode==='review'?`Read-only validation: report findings only. Do not implement or fix anything. For a committed range, untracked files are out of scope. Read the full diff in chunks from the supplied review patch; the inline preview may be truncated.`:'',
       stage==='coder'?'':'Host verification evidence: '+JSON.stringify(s.checks || []),
       stage==='coder'?'':'Actual coder session/tool-output evidence: '+JSON.stringify(s.reports.filter(r=>r.stage==='coder' && r.task===s.task).map(r=>r.report.executionEvidence).filter(Boolean))+'. Read these logs for pre-fix failing tests or other execution evidence not present in post-fix host checks. Do not replace them with coder prose claims.',
       'Use the repository instruction files. Review paths not shown in truncated diffs yourself. Never treat a prior agent claim as test evidence.'
@@ -339,6 +367,15 @@ export function registerDelivery(pi,schemas,deps={}) {
     }
     config=d.loadConfig(d.configPath());
     if(reconcileOrphanedRun())return statusText();
+    const blockedReport=blockedReviewReport();
+    if(taskChecks===undefined && blockedReport) {
+      if(s.active || s.pendingRetry || s.pendingContinuation || s.resumeStage)throw new Error('Blocked review cannot resume while an active or pending continuation/retry exists; reconcile the retained execution first.');
+      if(snapshot()!==s.snapshot)throw new Error('Blocked review snapshot changed; inspect the workspace before retrying the reviewer.');
+      const recovery=blockedReviewRecovery();
+      if(!recovery)throw new Error('Blocked review evidence is no longer safely retryable; inspect the workspace and retained report.');
+      s.stage=recovery.stage;s.reason='';s.feedback=JSON.stringify(recovery.report);s.active=null;save();start();
+      return 'Retrying the evidence-blocked reviewer at the same stage. The coder, round, task, routes and prior blocked report are preserved.';
+    }
     if(taskChecks===undefined && rejectedExcludedModelLaunch()) {
       const reason=s.active.preflightRejection ?? s.reason;
       s.failedRun={...s.active,task:s.task,round:s.round,state:'failed',error:reason,nativeError:reason,notLaunched:true,durationMs:0,sessionFiles:[]};
@@ -485,7 +522,7 @@ export function registerDelivery(pi,schemas,deps={}) {
           // Persist launch reservation before RPC. A crash/timeout here must never replay a writer.
           const continuation=Boolean(s.pendingContinuation || s.pendingRetry?.continuation);
           const budgetMs=s.pendingRetry?.budgetMs ?? attemptBudget(s.timeouts || timeoutPolicy(config.timeouts),s.stage,s.stage==='coder'?codingLedger().spentMs:0,continuation);
-          s.active={id:null,dir:null,model:s.routes[s.stage],stage:s.stage,budgetMs,startedAt:d.now(),continuation};delete s.pendingContinuation;delete s.pendingRetry;save();
+          s.active={id:null,dir:null,model:s.routes[s.stage],stage:s.stage,agent:AGENTS[s.stage],childIndex:0,budgetMs,startedAt:d.now(),continuation};delete s.pendingContinuation;delete s.pendingRetry;save();
           const params={agent:AGENTS[s.stage],agentScope:'user',cwd:root,model:s.routes[s.stage],context:'fresh',async:true,task:briefing(s.stage),outputSchema:REPORT_SCHEMA,output:false,timeoutMs:budgetMs,share:false,acceptance:{level:'none',reason:'Delivery owns structured review and host verification gates'}};
           const launched=await d.rpc(pi.events,'spawn',params,60000);
           const details=launched.details;
@@ -700,6 +737,13 @@ export function registerDelivery(pi,schemas,deps={}) {
       const saved=entries.filter(e=>e.type==='custom'&&e.customType===ENTRY).at(-1)?.data;
       if(saved?.workspace===root && saved.owner===ctx.sessionManager.getSessionId())s=structuredClone(saved);
       else s=initialState();
+      // Legacy retained runs predate the native child identity fields. Restore only
+      // the trusted single-child identity implied by the persisted execution stage;
+      // malformed or unknown ownership remains fail-closed in ownedSupervisorReply.
+      if(s.active && !Object.hasOwn(s.active,'agent') && !Object.hasOwn(s.active,'childIndex')) {
+        const agent=AGENTS[s.active.stage];
+        if(agent && s.active.id) {s.active.agent=agent;s.active.childIndex=0;}
+      }
       if(saved?.active && saved.owner!==ctx.sessionManager.getSessionId()) {s.enabled=true;s.reason='Forked delivery run: return to owning session; no automatic replay';s.stage='blocked';}
       else if(!saved)s.enabled=config.repos.includes(root);
       if(s.enabled) {
@@ -733,10 +777,27 @@ export function registerDelivery(pi,schemas,deps={}) {
     if(modelId(ctx.model)!==(config.routes.planning||ASTRA) && !await selectPlanning()){ctx.abort?.();return;}
     return {systemPrompt:e.systemPrompt+'\n\nDELIVERY MODE ACTIVE. You are the planning/orchestration parent, never the implementer. Infer task intent from the user message AND conversation, not a command or keyword. During planning, ask the user concise questions in normal conversation whenever missing information materially affects scope, behavior, acceptance criteria or implementation choices. Read available repository context first; do not ask again about decisions already supplied. Ask one focused question at a time, offer concrete options when useful, and wait for the answer before finalizing the affected part of the plan. You may continue independent read-only investigation while waiting. Do not invent requirements or submit delivery_plan merely to avoid asking a question. A clarification answer is not approval to execute: incorporate it into the proposal, show the resolved plan, then obtain approval for that plan. Select relevant installed SPARK skills lazily: reviews use requesting-code-review/audit, bugs use debugging, new features use brainstorming/planning. UI work also uses available frontend/design/accessibility skills; pass selected skill paths and design requirements in task instructions. Do not invent missing skills. For review/validation requests, inspect delivery_diff (commits=N for recent commits), then call delivery_plan with mode=review: this starts reviewers automatically, with no coder or fixes. Do not ask for approval for the requested read-only review. Set start=false ONLY if the user asked for a plan without execution. Review criteria go in task.acceptance. For implementation, put each task\'s executable checks in tasks[].checks; top-level checks are FINAL release checks, run only after all tasks. Never assign a later task\'s test to an earlier task. Checks are commands, NEVER prose. Use checks=[] for static review and disclose tests not run. When the user explicitly requests execution of an existing Markdown plan, call delivery_execute with planFile even after reload; it adopts the file and returns instructions for deriving its tasks through delivery_plan. Preserve all task boundaries and global constraints. Do not demand prior registration or another approval for the same unchanged document. If unresolved scope/product decisions genuinely prevent execution, clarify rather than guess. Out-of-scope broken/external symlinks are coverage warnings, not reasons to demand repository repairs; do not follow or depend on their targets. For new changes, show a concise human-readable plan using delivery_plan with mode=implementation; wait for the user to agree in conversation, then CALL delivery_execute immediately. Do not merely promise to execute. Rejections, questions and requested revisions are not approval; clarify genuinely ambiguous intent. Never instruct the user to run /delivery approve or select a review mode. If a read-only review blocked because checks were invalid, prepare corrected executable checks and retry that review through delivery_plan. For a legacy multi-task implementation blocked by premature final checks, read delivery_status and the approved source plan, then call delivery_resume with taskChecks for every existing task. It corrects ordering after confirmation, preserves final gates and completed coding evidence, and resumes current-task checks and independent reviews without replaying the coder. Do not replace that implementation plan or increase retry limits. Read/search and delivery tools are available; parent shell/edit/write and direct child execution are blocked. The extension owns coder/reviewer execution. During a run, answer without changing scope. Coding timeouts have one bounded same-model continuation; do not request approval again for that already approved allowance. For retained interrupted work with an active/unresolved child or reserved continuation, use delivery_resume; never replace that owned child. Closed transport failures retry automatically at most twice on the same route, preserving partial work and budgets. Do not request another approval or route change for those retries. Other closed failed attempts are reconciled without automatic retry; inspect their native error and retained work before proposing further changes. An exhausted or failed terminal task with no owned child is different: inspect delivery_status and prepare its new corrective plan, not repeated resume/approval calls. No saved Markdown file is required when retained task context exists. For supported recovery, changed routes/budgets require explicit confirmation while retaining partial work; never replace an active or unresolved child with delivery_plan. Budget warnings are not proof of a stalled provider; a quiet running tool must not be killed. Only delivery_status establishes completion; never claim unrun checks or blocked work passed.\nCurrent state: '+status()+'\nNext action: '+JSON.stringify(nextAction())+'\nUse delivery_configure without routes to inspect configuration and exact available model IDs. Only request setup for missing model configuration or an explicit user route change. For requested route changes, use delivery_configure with the selected exact IDs; it preserves work and shows a confirmation. Do not recommend model speed or capability from names alone. Use delivery_steer to prioritize approved checks in a running coder; direct subagent steer is blocked. A steering acknowledgment means the runner accepted the request, not that the worker received or acted on it. Read native transcript command results before claiming checks never ran, passed or failed; missing build artifacts and long gaps between tools do not establish those claims. A closed failed attempt needs a corrective proposal, not a new session. Follow the reported next action; repeating setup/resume/approval does not create a pending plan.'+(terminalCorrection()?'\n'+correctivePlanAction():'')};
   });
+  function ownedSupervisorReply(input) {
+    const active=s.active;
+    if(!active?.id || !input?.replyTo || !active.agent || !Number.isInteger(active.childIndex))return false;
+    // Native pi-subagents validates replyTo and recipient, while this extension binds
+    // the no-prompt path to the request journaled for this exact owned child. Do not
+    // infer ownership from reply prose or from the existence of another live child.
+    return ctx?.sessionManager?.getBranch?.().some(entry=>{
+      if(entry?.customType!=='subagent_supervisor_request')return false;
+      const details=entry.details || entry.data || {};
+      return (details.id===input.replyTo || details.requestId===input.replyTo)
+        && details.runId===active.id
+        && details.agent===active.agent
+        && details.childIndex===active.childIndex;
+    }) ?? false;
+  }
   pi.on('tool_call',async(e,c)=>{
     if(s.enabled && e.toolName==='subagent_supervisor' && e.input?.action==='reply') {
-      const ok=s.active?.id && c.hasUI && await c.ui.confirm('Approve supervisor reply?',JSON.stringify(e.input)+'\nDo not approve scope/model changes here; those require a new delivery plan.');
-      return ok?undefined:{block:true,reason:'Supervisor response needs explicit user approval'};
+      // An active owned worker may receive supervisor evidence/clarifications directly.
+      // This is informational only: native request/recipient validation still applies,
+      // and replies cannot authorize scope, model, budget, review or tool changes.
+      return ownedSupervisorReply(e.input)?undefined:{block:true,reason:'Supervisor response requires an active owned worker'};
     }
     if(s.enabled && !parentToolAllowed(e.toolName,e.input)) {
       const reason=e.toolName==='subagent' && e.input?.action==='steer'?'Direct subagent steering is blocked. Use delivery_steer to prioritize the running owned coder\'s approved checks. No steering message was queued by this rejected call.':'Delivery mode: parent mutation/unmanaged delegation is blocked. No tool action was executed. Do not retry with a generic worker, different agent, cwd or async setting. Use delivery tools to continue; the extension owns dispatch on the configured model routes.';

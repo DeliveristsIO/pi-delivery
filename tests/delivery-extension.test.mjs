@@ -8,12 +8,14 @@ import {timeoutPolicy} from '../extensions/delivery/policy.mjs';
 const routes={planning:'openai-codex/gpt-6-astra',coder:'custom/c',spec:'custom/r',quality:'custom/r',security:'custom/s'};
 const plan={title:'Fixture',tasks:[{title:'Add',instructions:'Add one',files:['a'],checks:['node --test'],acceptance:['works']}],checks:['node --test'],risk:'low',security:true};
 function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
+ const configuredWorkingTreeEvidence=config.workingTreeEvidence;config={...config};delete config.workingTreeEvidence;
  const events={},commands={},tools={},entries=[],statuses=[],messages=[],calls=[];
  let model={provider:'openai-codex',id:'gpt-5.5'};
  const models=[...new Set(Object.values(routes))].map(s=>{const [provider,...id]=s.split('/');return {provider,id:id.join('/')};});
  const ctx={cwd:'/repo',hasUI:true,mode:'tui',isIdle:()=>true,isProjectTrusted:()=>true,modelRegistry:{getAll:()=>models,getAvailable:()=>models},get model(){return model;},sessionManager:{getSessionId:()=> 'session',getBranch:()=>entries},ui:{setStatus:(k,v)=>statuses.push(v),notify:()=>{},confirm:async()=>true,select:async(t,opts)=>opts[0],input:async()=> 'trial'}};
  const pi={on:(e,h)=>events[e]=h,registerCommand:(n,c)=>commands[n]=c,registerTool:t=>tools[t.name]=t,appendEntry:(customType,data)=>entries.push({type:'custom',customType,data:structuredClone(data)}),setModel:async m=>{model=m;return true;},sendMessage:m=>messages.push(m),sendUserMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','edit','write','delivery_plan'],setActiveTools:()=>{},events:{}};
  const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,orphanedRunEvidence:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false};
+ if(configuredWorkingTreeEvidence)deps.workingTreeEvidence=configuredWorkingTreeEvidence;
  const controller=registerDelivery(pi,{plan:{},empty:{}},deps);
  return {pi,ctx,events,commands,tools,entries,statuses,messages,calls,controller,deps,config};
 }
@@ -575,9 +577,35 @@ test('approval preview is readable rather than a JSON object dump',async()=>{
  await h.commands.delivery.handler('approve',h.ctx);
  assert.match(body,/Tasks/);assert.match(body,/node --test/);assert.doesNotMatch(body,/"tasks"\s*:/);
 });
-test('human supervisor reply is confirmed; parent cannot authorize it silently',async()=>{
+const supervisorRequestEntry=(runId='owned',agent='delivery-coder',childIndex=0,id='request-1')=>({type:'custom_message',customType:'subagent_supervisor_request',details:{id,requestId:id,runId,agent,childIndex}});
+for (const hasUI of [true, false]) test(`active supervisor replies are informational without a confirmation prompt (${hasUI ? 'UI' : 'no UI'})`,async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder,agent:'delivery-coder',childIndex:0}}),supervisorRequestEntry());
+ h.ctx.hasUI=hasUI;
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ await h.events.session_start({},h.ctx);
+ const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'request-1',message:'clarification'}},h.ctx);
+ assert.equal(response,undefined);
+});
+
+test('active worker does not authorize a same-session supervisor reply for another child',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder,agent:'delivery-coder',childIndex:0}}),supervisorRequestEntry('other-run','worker',1,'other-request'));
+ await h.events.session_start({},h.ctx);
+ const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'other-request',message:'clarification'}},h.ctx);
+ assert.equal(response.block,true);assert.match(response.reason,/owned worker/);
+});
+
+test('legacy active owned worker state restores trusted supervisor reply identity',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder}}),supervisorRequestEntry());
+ await h.events.session_start({},h.ctx);
+ h.ctx.hasUI=false;h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'request-1',message:'clarification'}},h.ctx);
+ assert.equal(response,undefined);
+ assert.equal(h.controller.state().active.agent,'delivery-coder');
+ assert.equal(h.controller.state().active.childIndex,0);
+});
+test('supervisor replies without an active owned worker remain blocked',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
- const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',message:'approve scope'}},h.ctx);
+ const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'request-1',message:'clarification'}},h.ctx);
  assert.equal(response.block,true);
 });
 test('runtime failed child cannot become approved from prose',async()=>{
@@ -890,6 +918,29 @@ test('configured command timeout bounds each verification command',async()=>{
  assert.equal(h.controller.state().stage,'complete');
  assert.deepEqual(seen,[30*60000,30*60000]);
 });
+function blockedReviewHarness({stage='spec',round=1,summary='aggregate diff was truncated',active=null,snapshotChanged=false}={}) {
+ const h=harness();
+ const blockedPlan={...plan,security:false};
+ const report={stage,task:0,round, snapshot:'hash',report:{status:'blocked',summary,findings:[]}};
+ h.entries.push(oldRunEntry('blocked',routes,{plan:blockedPlan,round,reports:[report],active,reason:summary}));
+ if(snapshotChanged)h.deps.fingerprint=()=> 'changed';
+ return h;
+}
+test('resume retries a closed evidence-blocked spec reviewer without a coder or round increment',async()=>{
+ const h=blockedReviewHarness();await h.events.session_start({},h.ctx);const before=h.controller.state();
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ const reviewer=h.calls.find(c=>c.method==='spawn' && c.params.agent==='delivery-reviewer');assert.ok(reviewer);
+ assert.equal(h.controller.state().round,before.round);assert.equal(h.controller.state().task,before.task);
+ assert.ok(h.controller.state().reports.some(r=>r.report.status==='blocked'));
+});
+
+test('blocked review cannot resume while a child is active or snapshot changed',async()=>{
+ for(const h of [blockedReviewHarness({active:{id:'live',dir:'/fake',stage:'spec',model:routes.spec}}),blockedReviewHarness({snapshotChanged:true})]) {
+  await h.events.session_start({},h.ctx);
+  await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/active|snapshot/i);
+ }
+});
+
 test('uncertain coder attestation charges the full reserved allowance without claiming non-launch',async()=>{
  const h=harness();h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active:{id:null,dir:null,stage:'coder',model:routes.coder,budgetMs:900000,startedAt:0},coding:{0:{spentMs:0,continuations:0}}}));
  await h.events.session_start({},h.ctx);
@@ -906,4 +957,20 @@ test('legacy retained timeouts omit commandMs without creating a false budget ch
  await h.events.session_start({},h.ctx);
  await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');assert.equal(h.calls.filter(c=>c.method==='stop').length,0);
+});
+
+test('spec briefing scopes diff review to current task and never advertises parent-only delivery_diff',async()=>{
+ let scoped;const h=harness({version:1,routes, evidence:{},repos:['/repo'],workingTreeEvidence:(_root,paths)=>{if(paths)scoped=paths;return 'exact current-task diff\\napp/a.rb\\naccepted prior-task changes are preserved baseline';}});
+ const p={...plan,security:false,tasks:[{...plan.tasks[0],files:['app/a.rb','test/a_test.rb']}]};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',p,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const reviewerCall=h.calls.find(c=>c.method==='spawn' && c.params?.agent==='delivery-reviewer');assert.ok(reviewerCall,JSON.stringify({calls:h.calls,state:h.controller.state(),messages:h.messages}));const briefing=reviewerCall.params.task;
+ assert.deepEqual(scoped,['app/a.rb','test/a_test.rb']);assert.match(briefing,/exact current-task diff/i);assert.match(briefing,/app\/a\.rb/);
+ assert.match(briefing,/accepted prior-task changes.*preserved baseline/i);assert.doesNotMatch(briefing,/continue delivery_diff/i);
+});
+
+test('quality briefing requires aggregate inspection through available read and bash tools',async()=>{
+ const h=harness({version:1,routes, evidence:{},repos:['/repo'],workingTreeEvidence:()=> 'aggregate diff'});
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',{...plan,security:false},null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const reviewerCall=h.calls.find(c=>c.method==='spawn' && c.params?.agent==='delivery-reviewer' && c.params.task.includes('Independent quality'));assert.ok(reviewerCall,JSON.stringify({calls:h.calls,state:h.controller.state(),messages:h.messages}));const briefing=reviewerCall.params.task;
+ assert.match(briefing,/git diff --no-ext-diff/i);assert.match(briefing,/do not block solely because embedded evidence is truncated/i);
 });

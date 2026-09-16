@@ -4,7 +4,7 @@ import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,unlinkSync,rmSync,mkd
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {fingerprint,revisionRange,diff,reviewPatch,assertCommittedWorkspace,validateCommands,readPlan} from '../extensions/delivery/io.mjs';
+import {fingerprint,revisionRange,diff,reviewPatch,workingTreeEvidence,assertCommittedWorkspace,validateCommands,readPlan} from '../extensions/delivery/io.mjs';
 import {initialState,approve,advance,validatePlan} from '../extensions/delivery/policy.mjs';
 function repo(t){const d=mkdtempSync(join(tmpdir(),'delivery-review-'));t.after(()=>rmSync(d,{recursive:true,force:true}));execFileSync('git',['init','-q',d]);return d;}
 const plan={title:'Review',mode:'review',commits:2,tasks:[{title:'Review changes',instructions:'No fixes',files:['a'],acceptance:['Requirements satisfied']}],checks:['node --test'],risk:'low',security:true};
@@ -24,6 +24,12 @@ test('unsupported link targets warn outside scope but block when required',t=>{
   assert.throws(()=>fingerprint(d,{commands:['test -e link/file']}),/required.*symlink/i);
   unlinkSync(link);
  }
+});
+test('working-tree evidence scopes tracked diff and untracked discovery to task paths',t=>{
+ const d=repo(t);mkdirSync(join(d,'app'),{recursive:true});mkdirSync(join(d,'other'),{recursive:true});
+ writeFileSync(join(d,'app','a.rb'),'changed\n');writeFileSync(join(d,'other','b.rb'),'unrelated\n');
+ const evidence=workingTreeEvidence(d,['app/a.rb']);
+ assert.ok(evidence.includes('app/a.rb'));assert.ok(!evidence.includes('other/b.rb'));
 });
 test('commit range supplies actual committed diff even on a clean workspace',t=>{
  const d=repo(t);

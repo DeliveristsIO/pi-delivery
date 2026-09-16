@@ -91,6 +91,8 @@ If a run gets stuck, check `/delivery status` first. Reviewers are never given w
 
 Status identifies the next action, the models bound to the retained plan, models configured for future plans, native worker evidence and recorded host checks. A closed failed attempt needs a corrective proposal from retained requirements; it does not require a new session or another setup. Calling resume on a running, completed or already-closed run returns guidance without launching a duplicate worker.
 
+During an active owned delivery run, supervisor replies are accepted as informational evidence or clarifications without an extra confirmation prompt, including non-UI contexts. They cannot authorize scope, model or budget changes, waive reviews, or broaden tool permissions; those remain subject to the explicit delivery approval mechanisms.
+
 An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
 
 Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command (configurable), at most 2 fix rounds per task. Every implementation task requires its own `tasks[].checks`; top-level checks are release gates that run once, after all tasks. See [docs/configuration.md](docs/configuration.md).

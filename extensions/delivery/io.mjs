@@ -100,6 +100,21 @@ export function assertCommittedWorkspace(root,range) {
   if(git(root,['rev-parse','HEAD']).trim()!==range.head)throw new Error('HEAD changed since commit selection');
   if(git(root,['diff','--no-ext-diff','--no-textconv','HEAD','--']).trim())throw new Error('Commit review requires tracked files to match HEAD; preserve edits and use a clean worktree or review working-tree changes instead.');
 }
+function pathspecs(paths) {
+  if(paths===undefined)return [];
+  if(!Array.isArray(paths) || paths.length===0 || paths.length>100)throw new Error('Invalid evidence paths');
+  for(const path of paths) {
+    if(typeof path!=='string' || !path || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').includes('..') || path.split('/').includes('.git'))throw new Error('Invalid evidence path');
+  }
+  return ['--',...paths];
+}
+export function workingTreeEvidence(root,paths) {
+  const scope=pathspecs(paths);
+  const status=git(root,['status','--short','--untracked-files=all',...scope]);
+  const tracked=git(root,['diff','--no-ext-diff',...scope]);
+  const untracked=git(root,['ls-files','--others','--exclude-standard',...scope]);
+  return `STATUS (scoped paths only):\n${status}TRACKED WORKING-TREE DIFF:\n${tracked}UNTRACKED PATHS (scoped; inspect contents with read):\n${untracked}`;
+}
 export function diff(root,range,limit=40000,offset=0) {
   const status=git(root,['status','--short']);
   if(range && ![range.base,range.head].every(ref=>/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(ref)))throw new Error('Expected pinned commit IDs');

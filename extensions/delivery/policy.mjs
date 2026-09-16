@@ -74,7 +74,9 @@ export function repairCheckScopes(state,taskChecks) {
 export function parentToolAllowed(name, input) {
   if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_status','delivery_diff','delivery_configure','delivery_steer'].includes(name)) return true;
   if (name==='subagent') return ['status','list','get','models','guide','doctor','children.list'].includes(input?.action);
-  // Supervisor responses are handled by the user, not an LLM able to authorize scope changes.
+  // Keep reply out of this global allowlist: only the extension's active-owned-run
+  // interception admits native supervisor replies, which are informational evidence
+  // and cannot authorize scope/model/budget, review waivers or tool permissions.
   return name==='subagent_supervisor' && ['pending','list'].includes(input?.action);
 }
 export function timeoutPolicy(input={}) {
