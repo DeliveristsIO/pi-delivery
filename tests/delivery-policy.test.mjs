@@ -22,6 +22,7 @@ test('plan must have bounded concrete scope and verification', () => {
   assert.throws(() => validatePlan({...plan, checks:[]}), /checks/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], checks:undefined}]}), /explicit task.checks/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:['../escape']}]}), /files/);
+  assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:[':(exclude)src/a.js']}]}), /files/);
 });
 test('parent cannot edit, shell, delegate directly or bypass via custom tools', () => {
   for (const name of ['bash','powershell','edit','write','interactive_shell','mcp','subagent']) assert.equal(parentToolAllowed(name, {}), false, name);

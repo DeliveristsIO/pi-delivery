@@ -27,7 +27,7 @@ export function validatePlan(input) {
   check(Array.isArray(input.tasks) && input.tasks.length>0 && input.tasks.length<=12, 'Plan needs 1–12 tasks');
   for (const t of input.tasks) {
     check(text(t.title,200) && text(t.instructions), 'Invalid task instructions');
-    check(Array.isArray(t.files) && t.files.length>0 && t.files.length<=100 && t.files.every(f=>text(f,512) && !f.startsWith('/') && !f.includes('\\') && !f.split('/').includes('..') && !f.split('/').includes('.git')), 'Invalid task files');
+    check(Array.isArray(t.files) && t.files.length>0 && t.files.length<=100 && t.files.every(f=>text(f,512) && !f.startsWith('/') && !f.startsWith(':') && !f.includes('\\') && !f.split('/').includes('..') && !f.split('/').includes('.git')), 'Invalid task files');
     if(t.checks!==undefined)check(validChecks(t.checks,input.mode!=='review'),'Task checks must be executable commands (nonempty for implementation)');
     check(Array.isArray(t.acceptance) && t.acceptance.length>0 && t.acceptance.length<=30 && t.acceptance.every(a=>text(a,2000)), 'Task needs acceptance criteria');
   }

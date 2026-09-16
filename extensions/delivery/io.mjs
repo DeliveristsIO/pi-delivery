@@ -104,14 +104,14 @@ function pathspecs(paths) {
   if(paths===undefined)return [];
   if(!Array.isArray(paths) || paths.length===0 || paths.length>100)throw new Error('Invalid evidence paths');
   for(const path of paths) {
-    if(typeof path!=='string' || !path || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').includes('..') || path.split('/').includes('.git'))throw new Error('Invalid evidence path');
+    if(typeof path!=='string' || !path || path.startsWith('/') || path.startsWith(':') || path.includes('\\') || path.includes('\0') || path.split('/').includes('..') || path.split('/').includes('.git'))throw new Error('Invalid evidence path');
   }
   return ['--',...paths];
 }
 export function workingTreeEvidence(root,paths) {
   const scope=pathspecs(paths);
   const status=git(root,['status','--short','--untracked-files=all',...scope]);
-  const tracked=git(root,['diff','--no-ext-diff',...scope]);
+  const tracked=git(root,['diff','--no-ext-diff','HEAD',...scope]);
   const untracked=git(root,['ls-files','--others','--exclude-standard',...scope]);
   return `STATUS (scoped paths only):\n${status}TRACKED WORKING-TREE DIFF:\n${tracked}UNTRACKED PATHS (scoped; inspect contents with read):\n${untracked}`;
 }

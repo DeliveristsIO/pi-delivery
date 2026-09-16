@@ -25,11 +25,21 @@ test('unsupported link targets warn outside scope but block when required',t=>{
   unlinkSync(link);
  }
 });
-test('working-tree evidence scopes tracked diff and untracked discovery to task paths',t=>{
+test('working-tree evidence includes staged tracked changes and scopes untracked discovery to task paths',t=>{
  const d=repo(t);mkdirSync(join(d,'app'),{recursive:true});mkdirSync(join(d,'other'),{recursive:true});
- writeFileSync(join(d,'app','a.rb'),'changed\n');writeFileSync(join(d,'other','b.rb'),'unrelated\n');
- const evidence=workingTreeEvidence(d,['app/a.rb']);
- assert.ok(evidence.includes('app/a.rb'));assert.ok(!evidence.includes('other/b.rb'));
+ writeFileSync(join(d,'app','a.rb'),'base\n');writeFileSync(join(d,'other','b.rb'),'base\n');
+ execFileSync('git',['-C',d,'add','-A']);execFileSync('git',['-C',d,'-c','user.name=Test','-c','user.email=test@localhost','commit','-qm','base']);
+ writeFileSync(join(d,'app','a.rb'),'staged change\n');execFileSync('git',['-C',d,'add','app/a.rb']);
+ writeFileSync(join(d,'app','new.rb'),'untracked\n');writeFileSync(join(d,'other','new.rb'),'unrelated\n');
+ const evidence=workingTreeEvidence(d,['app/a.rb','app/new.rb']);
+ assert.match(evidence,/staged change/);assert.match(evidence,/app\/new\.rb/);assert.doesNotMatch(evidence,/other\/new\.rb/);assert.doesNotMatch(evidence,/other\/b\.rb/);
+});
+test('evidence pathspecs reject Git include and exclude magic consistently',t=>{
+ const d=repo(t);writeFileSync(join(d,'a'),'tracked\n');execFileSync('git',['-C',d,'add','a']);
+ for(const path of [':(exclude)a',':!a',':/a']) {
+  assert.throws(()=>workingTreeEvidence(d,[path]),/Invalid evidence path/);
+  assert.throws(()=>diff(d,undefined,40000,0,[path]),/Invalid evidence path/);
+ }
 });
 test('commit range supplies actual committed diff even on a clean workspace',t=>{
  const d=repo(t);
