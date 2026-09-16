@@ -592,7 +592,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       const timeouts=timeoutPolicy(config.timeouts);
       const corrections=correctionPolicy(config.corrections);
       const fileApproved=fileIntent && plan.sourcePlan?.path===fileIntent.path && plan.sourcePlan.hash===fileIntent.hash;
-      if(fileApproved && (hash!==fileIntent.snapshot || JSON.stringify(proposalRoutes)!==JSON.stringify(fileIntent.routes) || JSON.stringify(timeouts)!==JSON.stringify(fileIntent.timeouts)))throw new Error('Workspace or routes changed since the file execution request; refresh approval.');
+      if(fileApproved && (hash!==fileIntent.snapshot || JSON.stringify(proposalRoutes)!==JSON.stringify(fileIntent.routes) || JSON.stringify(timeouts)!==JSON.stringify(fileIntent.timeouts) || JSON.stringify(corrections)!==JSON.stringify(fileIntent.corrections)))throw new Error('Workspace, routes or correction policy changed since the file execution request; refresh approval.');
       const priorRun=s.plan && !s.active && (s.reports||[]).length?{stage:s.stage,task:s.task,round:s.round,reports:s.reports.length}:null;
       s={...initialState(),enabled:true,plan,coverageWarnings,timeouts,routes:proposalRoutes,correctionPolicy:corrections,stage:'awaiting-approval',snapshot:hash,priorRun};approvalTurn=null;save();
       display(readablePlan(config.routes));
@@ -614,9 +614,9 @@ export function registerDelivery(pi,schemas,deps={}) {
     if(path) {
       if(!requestText.trim())throw new Error('A real user request to execute this document is required');
       const document=d.readPlan(root,path);
-      const baseline=snapshot(null),routes=proposalCheck(),timeouts=timeoutPolicy(config.timeouts);
-      if(fileIntent && (document.path!==fileIntent.path || document.hash!==fileIntent.hash || baseline!==fileIntent.snapshot || JSON.stringify(routes)!==JSON.stringify(fileIntent.routes) || JSON.stringify(timeouts)!==JSON.stringify(fileIntent.timeouts)))throw new Error('Plan, workspace or routes changed since this execution request; a fresh user request is required.');
-      fileIntent={path:document.path,hash:document.hash,snapshot:baseline,routes,timeouts};
+      const baseline=snapshot(null),routes=proposalCheck(),timeouts=timeoutPolicy(config.timeouts),corrections=correctionPolicy(config.corrections);
+      if(fileIntent && (document.path!==fileIntent.path || document.hash!==fileIntent.hash || baseline!==fileIntent.snapshot || JSON.stringify(routes)!==JSON.stringify(fileIntent.routes) || JSON.stringify(timeouts)!==JSON.stringify(fileIntent.timeouts) || JSON.stringify(corrections)!==JSON.stringify(fileIntent.corrections)))throw new Error('Plan, workspace, routes or correction policy changed since this execution request; a fresh user request is required.');
+      fileIntent={path:document.path,hash:document.hash,snapshot:baseline,routes,timeouts,corrections};
       approvalTurn=null;
       return result(`Execution request accepted for ${document.path}. Read this authoritative plan, resolve genuine ambiguities if any, and call delivery_plan with planFile="${document.path}", preserving its task boundaries and constraints. Supply each task's executable tests in tasks[].checks and final release tests in top-level checks, never prose or future-task checks assigned early. Do not combine the entire plan into one task or expand scope. The unchanged requested document will execute without asking for approval again. No work has launched yet.\n\n${document.content}`,{sourcePlan:{path:document.path,hash:document.hash}});
     }

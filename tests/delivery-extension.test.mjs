@@ -474,6 +474,24 @@ test('file execution consent cannot survive a new message or changed document',a
  await h.tools.delivery_plan.execute('plan',{...plan,planFile:path},null,null,h.ctx);
  assert.equal(h.controller.state().stage,'awaiting-approval');assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
+test('file execution consent rejects a changed correction policy before auto-launch',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:0},repos:['/repo']});const path='docs/spark/plans/banking.md';
+ h.deps.readPlan=()=>({path,hash:'one',content:'# Banking'});
+ await h.events.session_start({},h.ctx);await h.events.input({text:`Execute ${path}`,source:'interactive'},h.ctx);
+ await h.tools.delivery_execute.execute('go',{planFile:path},null,null,h.ctx);
+ h.config.corrections={maxFixRounds:8};
+ await assert.rejects(h.tools.delivery_plan.execute('plan',{...plan,planFile:path},null,null,h.ctx),/correction.*changed|reapproval/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('repeated file execution request rejects a changed correction policy',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:0},repos:['/repo']});const path='docs/spark/plans/banking.md';
+ h.deps.readPlan=()=>({path,hash:'one',content:'# Banking'});
+ await h.events.session_start({},h.ctx);await h.events.input({text:`Execute ${path}`,source:'interactive'},h.ctx);
+ await h.tools.delivery_execute.execute('go',{planFile:path},null,null,h.ctx);
+ h.config.corrections={maxFixRounds:8};
+ await assert.rejects(h.tools.delivery_execute.execute('go',{planFile:path},null,null,h.ctx),/correction.*changed|fresh user request/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
 test('implementation and review checks keep their ordering and stop on failure',async()=>{
  for(const mode of ['implementation','review']) {
   const h=harness(),ran=[];
