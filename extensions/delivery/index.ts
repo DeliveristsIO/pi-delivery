@@ -22,7 +22,7 @@ export default function (pi: ExtensionAPI) {
         title: Type.String({ maxLength: 200 }),
         instructions: Type.String({ maxLength: 16000 }),
         files: Type.Array(Type.String(), { minItems: 1, maxItems: 100 }),
-        checks: Type.Optional(Type.Array(Type.String(), {minItems:1,maxItems:10,description:'Implementation checks run after THIS task, before its independent reviews. Required for each task of multi-task implementations. Never require files delivered by a later task.'})),
+        checks: Type.Optional(Type.Array(Type.String(), {minItems:1,maxItems:10,description:'Implementation checks run after THIS task, before its independent reviews. Required for every implementation task. Never require files delivered by a later task.'})),
         acceptance: Type.Array(Type.String(), { minItems: 1, maxItems: 30 }),
       }), { minItems: 1, maxItems: 12 }),
       checks: Type.Array(Type.String({description:'An actual executable test command, e.g. bundle exec rails test. NEVER a checklist sentence. Put human review criteria in task.acceptance.'}), { minItems: 0, maxItems: 10, description:'Final/release checks, run after ALL implementation tasks. For read-only review, these run before reviewers and at final verification. [] permits static review without claiming tests ran.' }),

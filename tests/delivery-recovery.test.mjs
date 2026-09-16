@@ -5,7 +5,7 @@ import { saveConfig, fingerprint, isSettled, verifyCommand } from '../extensions
 import { mkdtempSync,writeFileSync,symlinkSync,lstatSync,rmSync } from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-const plan={title:'x',tasks:[{title:'x',instructions:'x',files:['a'],acceptance:['x']}],checks:['true'],risk:'low',security:false};
+const plan={title:'x',tasks:[{title:'x',instructions:'x',files:['a'],checks:['true'],acceptance:['x']}],checks:['true'],risk:'low',security:false};
 const routes={planning:'p/a',coder:'p/b',spec:'p/c',quality:'p/c',security:'p/d'};
 function dir(t){const d=mkdtempSync(join(tmpdir(),'delivery-recovery-'));t.after(()=>rmSync(d,{recursive:true,force:true}));return d;}
 test('banking path automatically upgrades risk, not merely security review',()=>{

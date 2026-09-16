@@ -32,7 +32,7 @@ export function validatePlan(input) {
     check(Array.isArray(t.acceptance) && t.acceptance.length>0 && t.acceptance.length<=30 && t.acceptance.every(a=>text(a,2000)), 'Task needs acceptance criteria');
   }
   check(Array.isArray(input.checks) && (input.mode==='review' || input.checks.length>0) && input.checks.length<=10 && input.checks.every(c=>text(c,2000) && !c.includes('\0')), 'Use executable verification commands in checks (not review criteria); reviews may use an empty list');
-  if(input.mode!=='review' && input.tasks.length>1)check(input.tasks.every(t=>Array.isArray(t.checks)),'Multi-task implementation requires explicit task.checks; plan.checks are final release checks');
+  if(input.mode!=='review')check(input.tasks.every(t=>Array.isArray(t.checks)),'Implementation plans require explicit task.checks; plan.checks are final release checks');
   if(input.mode==='review')check(input.tasks.every(t=>!t.checks?.length),'Read-only review uses plan.checks, not task.checks');
   check(['low','high'].includes(input.risk) && typeof input.security==='boolean', 'Specify risk and security review');
   const p=structuredClone(input);
@@ -78,7 +78,7 @@ export function parentToolAllowed(name, input) {
   return name==='subagent_supervisor' && ['pending','list'].includes(input?.action);
 }
 export function timeoutPolicy(input={}) {
-  const defaults={coderMs:45*60000,continuationMs:15*60000,reviewMs:15*60000,idleWarningMs:5*60000,deadlineWarningMs:5*60000};
+  const defaults={coderMs:45*60000,continuationMs:15*60000,reviewMs:15*60000,commandMs:120000,idleWarningMs:5*60000,deadlineWarningMs:5*60000};
   check(input && typeof input==='object' && !Array.isArray(input),'Invalid timeout configuration');
   for(const key of Object.keys(input))check(Object.hasOwn(defaults,key),`Unknown timeout setting: ${key}`);
   const p={...defaults,...input};

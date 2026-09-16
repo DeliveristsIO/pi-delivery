@@ -26,8 +26,9 @@ test('real workspace hash is independent of check scoping, but still detects fil
   assert.throws(()=>fingerprint(dir,{commands:[...plan.checks,'node opaque']}),/Required workspace symlink/);
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
-test('multi-task plans require explicit checks; single-task legacy plans remain compatible',()=>{
+test('implementation plans require explicit task checks; retained single-task legacy plans stay compatible',()=>{
  assert.throws(()=>validatePlan(plan),/explicit task.checks/);
+ assert.throws(()=>validatePlan({...plan,tasks:[task]}),/explicit task.checks/);
  assert.throws(()=>checksForTask(plan,0),/Legacy/);
  const p=validatePlan({...plan,tasks:plan.tasks.map((t,i)=>({...t,checks:mapping[i]}))});
  assert.deepEqual(checksForTask(p,0),mapping[0]);assert.deepEqual(allChecks(p),['node release.mjs','node first.mjs','node later.mjs']);

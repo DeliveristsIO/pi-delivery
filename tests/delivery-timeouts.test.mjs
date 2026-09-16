@@ -14,9 +14,12 @@ test('coding gets 45 minutes plus one bounded 15-minute continuation; reviews ge
  assert.throws(()=>attemptBudget(p,'coder',60*60000,false),/budget exhausted/i);
 });
 test('timeout configuration is bounded and rejects typos',()=>{
+ assert.equal(timeoutPolicy().commandMs,120000);
  assert.equal(timeoutPolicy({coderMs:30*60000}).coderMs,30*60000);
+ assert.equal(timeoutPolicy({commandMs:30*60000}).commandMs,30*60000);
  assert.equal(timeoutPolicy({continuationMs:0}).continuationMs,0);
  assert.throws(()=>timeoutPolicy({coderMs:0}),/coderMs/);
+ assert.throws(()=>timeoutPolicy({commandMs:0}),/commandMs/);
  assert.throws(()=>timeoutPolicy({coderMs:Infinity}),/coderMs/);
  assert.throws(()=>timeoutPolicy({coderMS:123}),/Unknown/);
 });

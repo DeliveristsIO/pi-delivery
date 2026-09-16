@@ -168,8 +168,8 @@ export function registerDelivery(pi,schemas,deps={}) {
   }
   function routeCheck() {
     const r=validateRoutes(config.routes,available());
-    const limits=timeoutPolicy(config.timeouts);
-    if(s.timeouts && JSON.stringify(limits)!==JSON.stringify(s.timeouts))throw new Error('Time budget changed; reapproval required');
+    const limits=timeoutPolicy(config.timeouts),bound=s.timeouts?timeoutPolicy(s.timeouts):null;
+    if(bound && JSON.stringify(limits)!==JSON.stringify(bound))throw new Error('Time budget changed; reapproval required');
     if(s.routes && JSON.stringify(r)!==JSON.stringify(s.routes)) throw new Error('Routes changed; reapproval required');
     return r;
   }
@@ -225,8 +225,13 @@ export function registerDelivery(pi,schemas,deps={}) {
     if(progress?.state!=='failed' || progress.timedOut || !transient)return false;
     if(!d.isSettled(s.active))throw new Error('Failed child has not been confirmed closed; no execution restarted');
     if(progress.model!==s.active.model || !progress.attemptedModels?.length || progress.attemptedModels.some(m=>m!==s.active.model))throw new Error('Failed worker model evidence does not match the approved route');
-    refreshConfig();routeCheck();
+    // A changed or unavailable configuration is not a launch-safety error: refuse the
+    // retry and let the caller close the attempt instead of wedging reconciliation.
+    refreshConfig();
+    let routes;try {routes=validateRoutes(config.routes,available());}catch {return false;}
+    if(s.routes && JSON.stringify(routes)!==JSON.stringify(s.routes))return false;
     if(!s.timeouts)return false;
+    if(JSON.stringify(timeoutPolicy(config.timeouts))!==JSON.stringify(timeoutPolicy(s.timeouts)))return false;
     const key=`${s.task}:${s.round}:${s.active.stage}`;
     s.connectionRetries ||= {};
     const ledger=s.connectionRetries[key] ||= {count:0,spentMs:0};
@@ -238,7 +243,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       : s.timeouts.reviewMs-ledger.spentMs;
     if(ledger.count>=2 || !(budget>0))return false;
     const current=snapshot();
-    if(s.active.stage!=='coder' && current!==s.snapshot)throw new Error('Review modified source; connection retry refused');
+    if(s.active.stage!=='coder' && current!==s.snapshot)return false; // Source changed: close the attempt instead of retrying a review on a mutated tree.
     ledger.count++;
     s.interruptions ||= [];
     s.interruptions.push({id:s.active.id,task:s.task,stage:s.active.stage,model:s.active.model,error:progress.error,sessionFiles:progress.sessionFiles || [],snapshot:current});
@@ -267,7 +272,7 @@ export function registerDelivery(pi,schemas,deps={}) {
   }
   async function watchProgress(progress) {
     if(!progress || !['running','queued'].includes(progress.state))return;
-    const now=d.now(),limits=s.timeouts || timeoutPolicy(config.timeouts);
+    const now=d.now(),limits=s.timeouts?timeoutPolicy(s.timeouts):timeoutPolicy(config.timeouts);
     const deadline=progress.deadlineAt ?? (s.active.startedAt+s.active.budgetMs);
     const lead=Math.min(limits.deadlineWarningMs,(s.active.budgetMs || limits.coderMs)/5);
     if(Number.isFinite(deadline) && deadline>now && deadline-now<=lead && !s.active.deadlineWarned) {
@@ -283,10 +288,11 @@ export function registerDelivery(pi,schemas,deps={}) {
     }
   }
   async function approveRecoveryPolicy() {
-    const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts);
-    if(JSON.stringify(routes)===JSON.stringify(s.routes) && JSON.stringify(limits)===JSON.stringify(s.timeouts))return;
+    const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts),bound=s.timeouts?timeoutPolicy(s.timeouts):null;
+    if(JSON.stringify(routes)===JSON.stringify(s.routes) && bound && JSON.stringify(limits)===JSON.stringify(bound))return;
     const baseline=snapshot();
     const changes=ROLES.filter(r=>routes[r]!==s.routes?.[r]).map(r=>`${r}: ${s.routes?.[r] || 'unset'} → ${routes[r]}`);
+    for(const key of Object.keys(limits))if(limits[key]!==bound?.[key])changes.push(`${key.replace(/Ms$/,'')} budget/notice: ${(bound?.[key] ?? 0)/60000} → ${limits[key]/60000} minutes`);
     const text=[`Continue task ${s.task+1}/${s.plan.tasks.length}; preserve and verify partial changes.`,...changes,`Recovery allowance: up to ${limits.continuationMs/60000}m, within the ${(limits.coderMs+limits.continuationMs)/60000}m total coding budget.`,`Selected providers receive the task context and previous run evidence. The old writer is confirmed closed. No new scope, commits or deployment.`].join('\n');
     if(!ctx.hasUI || !await ctx.ui.confirm('Approve changed recovery routes/budget?',text))throw new Error('Changed recovery routes/budget were not approved; partial work preserved');
     if(snapshot()!==baseline)throw new Error('Workspace changed during recovery approval; inspect changes first');
@@ -340,11 +346,11 @@ export function registerDelivery(pi,schemas,deps={}) {
       return 'Excluded-model preflight reconciled: no worker was launched and no execution restarted. Retained plan, partial work, reviews and coding budget are preserved. Use delivery_configure only if the user wants different models. '+correctivePlanAction();
     }
     if(taskChecks===undefined && rejectedReadOnlyLaunch()) {
-      const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts);
+      const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts),bound=s.timeouts?timeoutPolicy(s.timeouts):null;
       if(snapshot()!==s.snapshot)throw new Error('Workspace changed since review; preflight recovery refused');
       const identity=JSON.stringify(s),stage=s.active.stage;
       const changes=ROLES.filter(r=>routes[r]!==s.routes?.[r]).map(r=>`${r}: ${s.routes?.[r]} → ${routes[r]}`);
-      for(const key of Object.keys(limits))if(limits[key]!==s.timeouts?.[key])changes.push(`${key.replace(/Ms$/,'')} budget/notice: ${(s.timeouts?.[key] ?? 0)/60000} → ${limits[key]/60000} minutes`);
+      for(const key of Object.keys(limits))if(limits[key]!==bound?.[key])changes.push(`${key.replace(/Ms$/,'')} budget/notice: ${(bound?.[key] ?? 0)/60000} → ${limits[key]/60000} minutes`);
       const preview=[`Native preflight rejected ${stage} before launching a child. Retry with ${routes[stage]} using an explicit read-only prompt.`,...changes,'Selected providers receive task context and prior evidence. No write tools, coder replay, retry reset or skipped reviews. Existing checks, findings and coding spend are retained.'].join('\n');
       if(!ctx.hasUI || !await ctx.ui.confirm('Retry the rejected read-only review?',preview))throw new Error('Read-only review retry was not approved');
       if(closed || JSON.stringify(s)!==identity)throw new Error('Delivery state changed during review recovery');
@@ -353,16 +359,32 @@ export function registerDelivery(pi,schemas,deps={}) {
       if(snapshot()!==s.snapshot)throw new Error('Workspace changed during review recovery');
       s.routes=routes;s.timeouts=limits;s.active=null;s.stage=stage;s.reason='';save();start();return;
     }
+    if(taskChecks===undefined && s.active && s.active.id===null && s.active.dir===null && s.stage==='blocked' && !s.active.preflightRejection) {
+      // Uncertain launch: the reservation never recorded a run ID, so closure cannot be
+      // proven from native artifacts. Only an explicit user attestation may close it.
+      if(!ctx.hasUI)throw new Error('Uncertain launch resolution requires interactive confirmation; state preserved');
+      if(snapshot()!==s.snapshot)throw new Error('Workspace changed since the uncertain launch; inspect changes before closing the reservation');
+      const identity=JSON.stringify(s),reason=s.reason;
+      const preview=['The retained launch reservation never recorded a run ID, so delivery cannot prove whether a worker started.','Confirm you inspected native subagent status and that no child from this attempt is still running or needs settling.','The reservation closes as a failed attempt. Launch and completion remain unknown; the full reserved coder allowance is charged when applicable. The plan, partial files, reviews and evidence are preserved; no execution restarts. Continuing needs a new corrective plan and fresh approval.'].join('\n');
+      if(!await ctx.ui.confirm('Close the uncertain launch reservation?',preview))throw new Error('Uncertain launch was not confirmed; state preserved');
+      if(closed || JSON.stringify(s)!==identity)throw new Error('Delivery state changed during confirmation; inspect status first');
+      const limits=s.timeouts?timeoutPolicy(s.timeouts):timeoutPolicy(config.timeouts);
+      const budgetMs=s.active.budgetMs ?? attemptBudget(limits,s.active.stage,s.active.stage==='coder'?codingLedger().spentMs:0,Boolean(s.active.continuation));
+      s.active.budgetMs=budgetMs;chargeCoding({durationMs:budgetMs});
+      s.failedRun={...s.active,task:s.task,round:s.round,state:'failed',error:reason,nativeError:reason,launchUnknown:true,closureEvidence:{kind:'user-attestation',confirmedAt:d.now()},durationMs:budgetMs,durationEstimated:true,sessionFiles:[]};
+      s.active=null;delete s.resumeStage;save();
+      return 'Uncertain launch reservation closed by explicit user attestation; launch and completion remain unknown, and no execution restarted. Retained plan, partial work, reviews and evidence are preserved. '+correctivePlanAction();
+    }
     if(taskChecks!==undefined) {
       guardIdle();
-      const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts);
+      const routes=validateRoutes(config.routes,available()),limits=timeoutPolicy(config.timeouts),bound=s.timeouts?timeoutPolicy(s.timeouts):null;
       if(snapshot()!==s.snapshot)throw new Error('Workspace changed since the recorded coder result; check-scope recovery refused');
       const recovered=repairCheckScopes(s,taskChecks);
       recovered.routes=routes;recovered.timeouts=limits;
       d.validateCommands(root,allChecks(recovered.plan));
       const baseline=s.snapshot,identity=JSON.stringify(s);
       const changes=ROLES.filter(r=>routes[r]!==s.routes?.[r]).map(r=>`${r}: ${s.routes?.[r] || 'unset'} → ${routes[r]}`);
-      if(JSON.stringify(limits)!==JSON.stringify(s.timeouts))changes.push(`Adopt configured budgets: coder ${limits.coderMs/60000}m + ${limits.continuationMs/60000}m continuation per task; reviewers ${limits.reviewMs/60000}m. Previously consumed time remains charged.`);
+      if(!bound || JSON.stringify(limits)!==JSON.stringify(bound))changes.push(`Adopt configured budgets: coder ${limits.coderMs/60000}m + ${limits.continuationMs/60000}m continuation per task; reviewers ${limits.reviewMs/60000}m. Previously consumed time remains charged.`);
       const preview=['Correct verification ordering; preserve task scope, coder work, evidence and time spent.',...changes,'Selected providers receive the approved task context and prior execution evidence.',...recovered.plan.tasks.map((t,i)=>`Task ${i+1}: ${t.checks.join('; ')}`),'Final release checks remain mandatory:',...recovered.plan.checks,`Restore ${recovered.checkScopeRecovery.creditedRounds} rounds consumed by premature release checks; retain all other retry history.`].join('\n');
       if(!ctx.hasUI || !await ctx.ui.confirm(changes.length?'Approve check ordering and route/budget changes?':'Correct legacy check ordering and continue reviews?',preview))throw new Error('Check ordering correction was not approved; existing work preserved');
       if(closed || JSON.stringify(s)!==identity)throw new Error('Delivery state changed during check-scope approval');
@@ -386,12 +408,19 @@ export function registerDelivery(pi,schemas,deps={}) {
       if(['stopped','paused','blocked'].includes(progress?.state))throw new Error(`Native child is ${progress.state}; no execution restarted. Inspect native status before further recovery.`);
       s.stage=s.active.stage;
     } else if(s.pendingRetry) {
-      refreshConfig();routeCheck();s.stage=s.pendingRetry.stage;
+      refreshConfig();
+      let routes;try {routes=validateRoutes(config.routes,available());}catch {routes=null;}
+      if(!routes || (s.routes && JSON.stringify(routes)!==JSON.stringify(s.routes)) || !s.timeouts || JSON.stringify(timeoutPolicy(config.timeouts))!==JSON.stringify(timeoutPolicy(s.timeouts))) {
+        // A queued retry must never launch on changed bindings; cancel it and keep the evidence.
+        delete s.pendingRetry;s.stage='blocked';s.reason='Queued connection retry was cancelled because routes or budgets changed; prepare a corrective plan from the retained evidence.';save();
+        return statusText();
+      }
+      s.stage=s.pendingRetry.stage;
     } else if(s.pendingContinuation) {
       if(snapshot()!==s.snapshot)throw new Error('Workspace changed before continuation; inspect changes and obtain fresh approval');
       await approveRecoveryPolicy();s.stage='coder';
     }
-    else if(['checks','review-checks','verification','spec','quality','security'].includes(s.resumeStage))s.stage=s.resumeStage;
+    else if(['checks','review-checks','verification','spec','quality','security','coder'].includes(s.resumeStage))s.stage=s.resumeStage;
     else if(terminalCorrection())return statusText();
     else if(['awaiting-approval','complete'].includes(s.stage))return statusText();
     else throw new Error('No retained run or safe continuation to resume');
@@ -400,7 +429,7 @@ export function registerDelivery(pi,schemas,deps={}) {
   async function runChecks({commands=s.plan.checks,failureLabel,mutationLabel,fixable=false}) {
     checking=new AbortController();s.checks=[];save();
     for(const command of commands) {
-      const check=await d.verifyCommand(root,command,checking.signal);
+      const check=await d.verifyCommand(root,command,checking.signal,s.timeouts?.commandMs);
       if(closed)return false;
       s.checks.push(check);save();
       if(mutationLabel && snapshot()!==s.snapshot)throw new Error(mutationLabel);
@@ -415,7 +444,13 @@ export function registerDelivery(pi,schemas,deps={}) {
   async function pump() {
     try {
       while(!closed && s.enabled && !['blocked','complete'].includes(s.stage)) {
-        routeCheck();
+        try {routeCheck();}
+        catch(e) {
+          if(!s.active?.id)throw e;
+          // Never leave a live child unmonitored just because configuration changed.
+          try {await d.rpc(pi.events,'stop',{id:s.active.id});}catch {}
+          throw new Error(`${e.message} The owned child ${s.active.id} was asked to stop so its attempt can be reconciled; retry delivery_resume after it settles.`);
+        }
         if(s.plan.reviewRange)d.assertCommittedWorkspace(root,s.plan.reviewRange);
         if(s.plan.mode==='review' && s.stage==='spec' && !s.reviewChecksDone){s.stage='review-checks';save();}
         if(s.stage==='review-checks') {
@@ -570,7 +605,7 @@ export function registerDelivery(pi,schemas,deps={}) {
     const receipt=await d.rpc(pi.events,'steer',{id:s.active.id,message});
     return result('Verification steering request accepted by the runner. Delivery to the worker and execution of checks are not yet confirmed.',{receipt});
   }});
-  pi.registerTool({name:'delivery_diff',label:'Delivery diff',description:'Read git status and diff in 40k-character pages; pass offset to continue. Pass commits=N for the last N commits with pinned revisions and subjects. Defaults to proposed committed range or working-tree changes.',parameters:schemas.diff || schemas.empty,async execute(_id,params={}){if(!s.enabled)throw new Error('Activate /delivery');const count=params.commits ?? s.reviewCommits;const range=params.commits!==undefined?d.revisionRange(root,params.commits):(s.plan?.reviewRange || (count?d.revisionRange(root,count):undefined));const offset=params.offset ?? 0;if(!Number.isInteger(offset)||offset<0)throw new Error('Invalid diff offset');return result(d.diff(root,range,40000,offset),range || {});}});
+  pi.registerTool({name:'delivery_diff',label:'Delivery diff',description:'Read git status and diff in 40k-character pages; pass offset to continue. Pass commits=N for the last N commits with pinned revisions and subjects. Defaults to proposed committed range or working-tree changes.',parameters:schemas.diff || schemas.empty,async execute(_id,params={}){if(!s.enabled)throw new Error('Activate /delivery');const range=params.commits!==undefined?d.revisionRange(root,params.commits):s.plan?.reviewRange;const offset=params.offset ?? 0;if(!Number.isInteger(offset)||offset<0)throw new Error('Invalid diff offset');return result(d.diff(root,range,40000,offset),range || {});}});
 
   pi.registerCommand('delivery',{
     description:'Delivery: describe a task; setup, models, status, resume, off',
@@ -672,7 +707,7 @@ export function registerDelivery(pi,schemas,deps={}) {
         restrict();await selectPlanning();
         reconcileOrphanedRun();
         if(s.active) {s.stage='blocked';s.reason='Retained child requires /delivery resume reconciliation';}
-        else if(!['planning','awaiting-approval','complete','blocked'].includes(s.stage)) {s.resumeStage=s.stage;s.stage='blocked';s.reason=['checks','review-checks','verification'].includes(s.resumeStage)?'Interrupted host verification; delivery_resume reruns approved checks':'Interrupted between stages; use delivery_resume to reconcile before further work';}
+        else if(!['planning','awaiting-approval','complete','blocked'].includes(s.stage)) {s.resumeStage=s.stage;s.stage='blocked';s.reason=['checks','review-checks','verification'].includes(s.resumeStage)?'Interrupted host verification; delivery_resume reruns approved checks':s.resumeStage==='coder'?'Interrupted coding round; delivery_resume continues it within the remaining approved budget':'Interrupted between stages; use delivery_resume to reconcile before further work';}
         else {try{validateRoutes(config.routes,available());}catch(e){s.reason=e.message;}}
       }
       save();

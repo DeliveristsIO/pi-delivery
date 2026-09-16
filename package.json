@@ -24,6 +24,7 @@
     "skills/orchestrate-delivery/SKILL.md",
     "skills/security-review/SKILL.md",
     "skills/select-task-model/SKILL.md",
+    "scripts/check-release.mjs",
     "setup.sh",
     "install.sh",
     "README.md",

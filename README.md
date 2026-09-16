@@ -93,7 +93,7 @@ Status identifies the next action, the models bound to the retained plan, models
 
 An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
 
-Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command, at most 2 fix rounds per task. See [docs/configuration.md](docs/configuration.md).
+Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command (configurable), at most 2 fix rounds per task. Every implementation task requires its own `tasks[].checks`; top-level checks are release gates that run once, after all tasks. See [docs/configuration.md](docs/configuration.md).
 
 ## Limitations
 

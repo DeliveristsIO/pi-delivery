@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {registerDelivery} from '../extensions/delivery/extension.mjs';
 import {timeoutPolicy} from '../extensions/delivery/policy.mjs';
 const routes={planning:'openai-codex/gpt-6-astra',coder:'custom/c',spec:'custom/r',quality:'custom/r',security:'custom/s'};
-const plan={title:'Fixture',tasks:[{title:'Add',instructions:'Add one',files:['a'],acceptance:['works']}],checks:['node --test'],risk:'low',security:true};
+const plan={title:'Fixture',tasks:[{title:'Add',instructions:'Add one',files:['a'],checks:['node --test'],acceptance:['works']}],checks:['node --test'],risk:'low',security:true};
 function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const events={},commands={},tools={},entries=[],statuses=[],messages=[],calls=[];
  let model={provider:'openai-codex',id:'gpt-5.5'};
@@ -206,7 +206,8 @@ for(const evidence of ['matching','missing','other-reservation','other-snapshot'
  const next=harness(structuredClone(h.config));if(evidence!=='missing')next.entries.push(...entries);next.entries.push(current);
  await next.events.session_start({},next.ctx);
  if(evidence!=='matching') {
-  await assert.rejects(next.tools.delivery_resume.execute('r',{},null,null,next.ctx),/No retained run|Uncertain/);
+  next.ctx.ui.confirm=async()=>false;
+  await assert.rejects(next.tools.delivery_resume.execute('r',{},null,null,next.ctx),/not confirmed/i);
   assert.equal(next.calls.filter(c=>c.method==='spawn').length,0);return;
  }
  assert.equal(next.controller.state().active.preflightRejection,securityPreflightError);
@@ -232,10 +233,22 @@ test('unresolved children never receive a corrective-plan next action',async()=>
  assert.doesNotMatch(status.content[0].text,/NEXT ACTION:.*delivery_plan/);
  await assert.rejects(h.tools.delivery_plan.execute('p',plan,null,null,h.ctx),/owned run|unresolved/i);
 });
-test('unknown security launch errors remain uncertain, never retried',async()=>{
- const {h}=await rejectedSecurity('pi-subagents spawn timed out');const before=h.controller.state();
- await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/No retained run|Uncertain/);
- assert.deepEqual(h.controller.state(),before);
+test('unknown security launch errors stay uncertain without attestation and are never retried',async()=>{
+ const {h}=await rejectedSecurity('pi-subagents spawn timed out');const before=h.controller.state(),spawns=h.calls.filter(c=>c.method==='spawn').length;
+ h.ctx.ui.confirm=async()=>false;
+ await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/not confirmed/i);
+ assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,spawns);
+});
+test('uncertain launch closes only through explicit attestation, without replay',async()=>{
+ const {h}=await rejectedSecurity('pi-subagents spawn timed out');const before=h.controller.state(),spawns=h.calls.filter(c=>c.method==='spawn').length;
+ let prompt='';h.ctx.ui.confirm=async(_title,text)=>{prompt=text;return true;};
+ const r=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(r.content[0].text,/attestation/i);assert.match(r.content[0].text,/delivery_plan/);
+ assert.match(prompt,/subagent status/);
+ const state=h.controller.state();assert.equal(state.active,null);assert.equal(state.failedRun.launchUnknown,true);assert.equal(state.failedRun.notLaunched,undefined);
+ assert.equal(state.failedRun.closureEvidence.kind,'user-attestation');assert.equal(state.failedRun.durationEstimated,true);
+ assert.deepEqual(state.plan,before.plan);assert.deepEqual(state.reports,before.reports);assert.deepEqual(state.coding,before.coding);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,spawns);
 });
 test('later-task and final checks never run after the first coder',async()=>{
  const h=harness(),executed=[];let laterReady=false;
@@ -249,7 +262,7 @@ test('later-task and final checks never run after the first coder',async()=>{
  assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
 });
 for(const approval of ['accepted','declined','workspace changed','state changed','routes changed','budget changed'])test(`legacy check-scope recovery preserves work (${approval})`,async()=>{
- const h=harness();h.config.routes={...routes,security:routes.spec};h.config.timeouts={reviewMs:20*60000};const oldPlan={...plan,tasks:[plan.tasks[0],{...plan.tasks[0],title:'Later'}],checks:['node release-test.mjs']};
+ const h=harness();h.config.routes={...routes,security:routes.spec};h.config.timeouts={reviewMs:20*60000};const legacyTask={title:'Add',instructions:'Add one',files:['a'],acceptance:['works']};const oldPlan={...plan,tasks:[legacyTask,{...legacyTask,title:'Later'}],checks:['node release-test.mjs']};
  const reports=[0,1,2].flatMap(round=>[{stage:'coder',task:0,round,snapshot:'hash',runId:'old'+round,report:{status:'approved',summary:'done',findings:[],executionEvidence:{sessionFiles:['/fake/prior.jsonl']}}},{stage:'checks',task:0,round,snapshot:'hash',report:{status:'changes_requested',summary:'Host verification failed',findings:['node release-test.mjs: Missing later test']}}]);
  h.entries.push({type:'custom',customType:'delivery-mode-v1',data:{version:1,enabled:true,stage:'blocked',task:0,round:2,plan:oldPlan,routes,timeouts:timeoutPolicy(),snapshot:'hash',active:null,reports,reason:'Two fix/review rounds exhausted',coding:{0:{spentMs:900000,continuations:1}},workspace:'/repo',owner:'session'}});
  let approvedText='',confirmations=0;h.ctx.ui.confirm=async(_title,text)=>{confirmations++;approvedText=text;if(approval==='workspace changed')h.deps.fingerprint=()=> 'changed';if(approval==='state changed')await h.commands.delivery.handler('off',h.ctx);if(approval==='routes changed')h.config.routes={...routes,security:routes.coder};if(approval==='budget changed')h.config.timeouts={coderMs:30*60000};return approval!=='declined';};
@@ -380,7 +393,7 @@ test('planner interprets raw request and starts only reviewers for the pinned ra
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('validate last 2 commits',h.ctx);
  assert.equal(h.messages.at(-1),'validate last 2 commits');
  assert.match((await h.tools.delivery_diff.execute('diff',{commits:2})).content[0].text,/committed diff/);
- await h.tools.delivery_plan.execute('id',{...plan,mode:'review',commits:2},null,null,h.ctx);
+ await h.tools.delivery_plan.execute('id',{...plan,mode:'review',commits:2,tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
  assert.equal(h.controller.state().plan.mode,'review');assert.deepEqual(h.controller.state().plan.reviewRange,range);
  await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');assert.ok(checked>0);
@@ -390,7 +403,7 @@ test('planner interprets raw request and starts only reviewers for the pinned ra
 test('read-only check failure stops without dispatching an automatic fix',async()=>{
  const h=harness();h.deps.verifyCommand=async()=>({code:1,output:'failing test'});
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('review',h.ctx);
- await h.tools.delivery_plan.execute('id',{...plan,mode:'review'},null,null,h.ctx);
+ await h.tools.delivery_plan.execute('id',{...plan,mode:'review',tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
  await h.controller.settled();
  assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/failing test/);
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
@@ -398,7 +411,7 @@ test('read-only check failure stops without dispatching an automatic fix',async(
 test('ordinary user review request executes without an approval command',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
  await h.events.input({text:'Please validate these changes without fixing anything',source:'interactive'},h.ctx);
- await h.tools.delivery_plan.execute('id',{...plan,mode:'review'},null,null,h.ctx);await h.controller.settled();
+ await h.tools.delivery_plan.execute('id',{...plan,mode:'review',tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');
  assert.ok(h.calls.some(c=>c.method==='spawn'));assert.ok(h.calls.every(c=>c.params?.agent!=='delivery-coder'));
 });
@@ -441,14 +454,14 @@ test('implementation and review checks keep their ordering and stop on failure',
   const h=harness(),ran=[];
   h.deps.verifyCommand=async(_cwd,command)=>{ran.push(command);return {command,code:0,output:'PASS'};};
   await h.events.session_start({},h.ctx);
-  await h.tools.delivery_plan.execute('plan',{...plan,mode,checks:['first','second']},null,null,h.ctx);
+  await h.tools.delivery_plan.execute('plan',{...plan,mode,checks:['first','second'],tasks:[{...plan.tasks[0],checks:mode==='review'?undefined:['first','second']}]},null,null,h.ctx);
   await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
   assert.deepEqual(ran,['first','second','first','second']);assert.equal(h.controller.state().stage,'complete');
  }
  const h=harness(),ran=[];
  h.deps.verifyCommand=async(_cwd,command)=>{ran.push(command);return {command,code:1,output:'FAIL'};};
  await h.events.session_start({},h.ctx);
- await h.tools.delivery_plan.execute('plan',{...plan,mode:'review',checks:['first','second']},null,null,h.ctx);
+ await h.tools.delivery_plan.execute('plan',{...plan,mode:'review',checks:['first','second'],tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  assert.deepEqual(ran,['first']);assert.equal(h.controller.state().stage,'blocked');
 });
@@ -603,7 +616,8 @@ for(const evidence of ['matching','other-model','other-reservation','newer-unkno
   await next.tools.delivery_resume.execute('r',{},null,null,next.ctx);
   assert.equal(next.controller.state().active,null);assert.equal(next.controller.state().failedRun.notLaunched,true);
  } else {
-  const before=next.controller.state();await assert.rejects(next.tools.delivery_resume.execute('r',{},null,null,next.ctx),/No retained run/);assert.deepEqual(next.controller.state(),before);
+  next.ctx.ui.confirm=async()=>false;
+  const before=next.controller.state();await assert.rejects(next.tools.delivery_resume.execute('r',{},null,null,next.ctx),/not confirmed/i);assert.deepEqual(next.controller.state(),before);
  }
  assert.deepEqual(next.calls,[]);
 });
@@ -827,4 +841,69 @@ test('reboot recovery never refunds a previously charged attempt',async()=>{
  const h=harness();h.entries.push(oldRunEntry('blocked',routes,{active:{id:'lost',dir:'/gone',stage:'coder',model:routes.coder,budgetMs:900000,startedAt:1000,charged:true},coding:{0:{spentMs:3600000,continuations:1}}}));
  h.deps.orphanedRunEvidence=()=>({kind:'host-reboot',bootedAt:100000,startedAt:1000});
  await h.events.session_start({},h.ctx);assert.equal(h.controller.state().coding[0].spentMs,3600000);assert.equal(h.controller.state().active,null);
+});
+test('interrupted coding round resumes within its budget instead of dead-ending',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{round:1,timeouts:timeoutPolicy()}));
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ await h.events.session_start({},h.ctx);
+ assert.match((await h.tools.delivery_status.execute()).details.nextAction.message,/delivery_resume/);
+ const r=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.match(r.content[0].text,/Recovery started/);
+ assert.equal(h.controller.state().stage,'complete');
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);
+});
+test('changed routes close a failed child instead of wedging reconciliation',async()=>{
+ const h=harness();h.config.routes={...routes,coder:routes.spec};
+ h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active:{id:'failed-child',dir:'/fake',stage:'coder',model:routes.coder,budgetMs:2700000,startedAt:0}}));
+ h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>a.id==='failed-child'?{state:'failed',error:'Connection error.',model:routes.coder,attemptedModels:[routes.coder],durationMs:137000,sessionFiles:[]}:null;
+ await h.events.session_start({},h.ctx);
+ const r=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(r.content[0].text,/no execution restarted/i);
+ const state=h.controller.state();
+ assert.equal(state.active,null);assert.equal(state.failedRun.id,'failed-child');assert.equal(state.failedRun.error,'Connection error.');
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ assert.match((await h.tools.delivery_status.execute()).content[0].text,/delivery_plan/);
+});
+test('mid-run route change asks the live child to stop and reconciles after closure',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active:{id:'live-child',dir:'/fake',stage:'coder',model:routes.coder,budgetMs:2700000,startedAt:0}}));
+ let failed=false;
+ h.deps.isSettled=()=>true;
+ h.deps.runProgress=a=>a.id==='live-child'?(failed?{state:'failed',error:'Connection error.',model:routes.coder,attemptedModels:[routes.coder],durationMs:1000,sessionFiles:[]}:{state:'running',model:routes.coder,attemptedModels:[routes.coder]}):null;
+ await h.events.session_start({},h.ctx);
+ h.config.routes={...routes,coder:routes.spec};
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.ok(h.calls.some(c=>c.method==='stop'&&c.params.id==='live-child'));
+ assert.equal(h.controller.state().stage,'blocked');assert.equal(h.controller.state().active.id,'live-child');
+ failed=true;
+ const r=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(r.content[0].text,/no execution restarted/i);
+ assert.equal(h.controller.state().active,null);assert.equal(h.controller.state().failedRun.id,'live-child');
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('configured command timeout bounds each verification command',async()=>{
+ const h=harness();h.config.timeouts={commandMs:30*60000};
+ const seen=[];
+ h.deps.verifyCommand=async(_root,_command,_signal,timeoutMs)=>{seen.push(timeoutMs);return {code:0,output:'PASS'};};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('plan',plan,null,null,h.ctx);
+ await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');
+ assert.deepEqual(seen,[30*60000,30*60000]);
+});
+test('uncertain coder attestation charges the full reserved allowance without claiming non-launch',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{round:0,timeouts:timeoutPolicy(),active:{id:null,dir:null,stage:'coder',model:routes.coder,budgetMs:900000,startedAt:0},coding:{0:{spentMs:0,continuations:0}}}));
+ await h.events.session_start({},h.ctx);
+ const r=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(r.content[0].text,/launch and completion remain unknown/i);
+ const state=h.controller.state();assert.equal(state.active,null);assert.equal(state.failedRun.launchUnknown,true);assert.equal(state.failedRun.notLaunched,undefined);
+ assert.equal(state.failedRun.durationMs,900000);assert.equal(state.failedRun.durationEstimated,true);assert.equal(state.coding[0].spentMs,900000);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('legacy retained timeouts omit commandMs without creating a false budget change',async()=>{
+ const h=harness(),legacy=timeoutPolicy();delete legacy.commandMs;
+ h.entries.push(oldRunEntry('verification',routes,{round:0,timeouts:legacy}));
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected budget confirmation');};
+ await h.events.session_start({},h.ctx);
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.equal(h.calls.filter(c=>c.method==='stop').length,0);
 });

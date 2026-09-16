@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes } from '../extensions/delivery/policy.mjs';
 
 export const routes = { planning: 'openai-codex/gpt-6-astra', coder: 'ollama-cloud/coder', spec: 'anthropic/reviewer', quality: 'anthropic/reviewer', security: 'openai-codex/reviewer' };
-export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: 'Implement fixture', files: ['src/a.js'], acceptance: ['Works'] }], checks: ['node --test'], risk: 'low', security: true };
+export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: 'Implement fixture', files: ['src/a.js'], checks: ['node --test'], acceptance: ['Works'] }], checks: ['node --test'], risk: 'low', security: true };
 
 test('provider neutral catalog distinguishes available from listed; no inference claims', () => {
   const all = [{provider:'anthropic',id:'a'}, {provider:'custom',id:'b'}];
@@ -20,6 +20,7 @@ test('routes require every exact model, never inherit', () => {
 test('plan must have bounded concrete scope and verification', () => {
   assert.deepEqual(validatePlan(plan), plan);
   assert.throws(() => validatePlan({...plan, checks:[]}), /checks/);
+  assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], checks:undefined}]}), /explicit task.checks/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:['../escape']}]}), /files/);
 });
 test('parent cannot edit, shell, delegate directly or bypass via custom tools', () => {
