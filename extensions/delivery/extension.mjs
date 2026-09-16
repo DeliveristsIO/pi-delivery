@@ -43,9 +43,9 @@ export function registerDelivery(pi,schemas,deps={}) {
     refreshConfig();
     const routes=routeCheck(),hash=snapshot();
     if(hash!==s.snapshot)throw new Error('Workspace changed since proposal; refresh the plan first');
-    const corrections=correctionPolicy(config.corrections);
-    const boundCorrections=s.correctionPolicy || correctionPolicy({},true);
-    if(JSON.stringify(corrections)!==JSON.stringify(boundCorrections))throw new Error('Correction policy changed; reapproval required');
+    const boundCorrections=s.correctionPolicy;
+    const corrections=boundCorrections ? correctionPolicy(config.corrections) : correctionPolicy({},true);
+    if(boundCorrections && JSON.stringify(corrections)!==JSON.stringify(boundCorrections))throw new Error('Correction policy changed; reapproval required');
     d.validateCommands(root,allChecks(s.plan));
     return {routes,hash,timeouts:timeoutPolicy(config.timeouts),corrections};
   }

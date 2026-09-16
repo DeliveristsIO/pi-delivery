@@ -641,6 +641,16 @@ test('reloaded approval preserves the correction policy bound to the proposal',a
  await reloaded.tools.delivery_execute.execute('e',{},null,null,reloaded.ctx);await reloaded.controller.settled();
  assert.deepEqual(reloaded.controller.state().correctionPolicy,{maxFixRounds:3,source:'configured'});
 });
+test('reloaded legacy approval without correction policy keeps the two-round limit',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('awaiting-approval',routes));
+ await h.events.session_start({},h.ctx);
+ assert.equal(h.controller.state().correctionPolicy,undefined);
+ await h.events.input({text:'approve',source:'interactive'},h.ctx);
+ await h.tools.delivery_execute.execute('e',{},null,null,h.ctx);await h.controller.settled();
+ assert.deepEqual(h.controller.state().correctionPolicy,{maxFixRounds:2,source:'legacy'});
+ assert.equal(h.controller.state().stage,'complete');
+ assert.ok(h.calls.some(c=>c.method==='spawn'&&c.params.agent==='delivery-coder'));
+});
 const supervisorRequestEntry=(runId='owned',agent='delivery-coder',childIndex=0,id='request-1')=>({type:'custom_message',customType:'subagent_supervisor_request',details:{id,requestId:id,runId,agent,childIndex}});
 for (const hasUI of [true, false]) test(`active supervisor replies are informational without a confirmation prompt (${hasUI ? 'UI' : 'no UI'})`,async()=>{
  const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder,agent:'delivery-coder',childIndex:0}}),supervisorRequestEntry());
