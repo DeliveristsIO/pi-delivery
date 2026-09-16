@@ -402,6 +402,29 @@ test('planner interprets raw request and starts only reviewers for the pinned ra
  assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-reviewer','delivery-reviewer','delivery-security']);
  assert.ok(h.calls.filter(c=>c.method==='spawn').every(c=>c.params.task.includes('Host verification evidence: [{') && c.params.task.includes('committed diff')));
 });
+test('committed multi-task spec evidence is path-scoped while aggregate reviewers inspect the range',async()=>{
+ const h=harness();const range={base:'a'.repeat(40),head:'b'.repeat(40)},diffCalls=[];
+ h.deps.revisionRange=()=>range;h.deps.assertCommittedWorkspace=()=>{};
+ h.deps.diff=(_root,r,_limit,_offset,paths)=>{
+  diffCalls.push({range:r,paths});
+  return 'COMMITTED RANGE\n'+('large committed evidence '.repeat(2200))+'\n[Embedded diff truncated; inspect remaining approved files with repository-local git/read tools.]';
+ };
+ await h.events.session_start({},h.ctx);await h.commands.delivery.handler('validate last 2 commits',h.ctx);
+ const committedPlan={...plan,mode:'review',commits:2,security:false,tasks:[
+  {...plan.tasks[0],files:['app/a.rb'],checks:undefined},
+  {...plan.tasks[0],title:'Second',files:['app/b.rb'],checks:undefined}
+ ]};
+ await h.tools.delivery_plan.execute('p',committedPlan,null,null,h.ctx);await h.controller.settled();
+ const specs=h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-reviewer'&&c.params.task.includes('Independent spec'));
+ const qualities=h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-reviewer'&&c.params.task.includes('Independent quality'));
+ assert.equal(specs.length,2);assert.equal(qualities.length,2);
+ assert.deepEqual(diffCalls.map(c=>c.paths),[['app/a.rb'],undefined,['app/b.rb'],undefined]);
+ assert.match(specs[0].params.task,/exact current-task diff/i);assert.match(specs[0].params.task,/app\/a\.rb/);
+ assert.doesNotMatch(specs[0].params.task,/continue delivery_diff/i);
+ assert.match(qualities[0].params.task,/git diff --no-ext-diff/i);
+ assert.doesNotMatch(qualities[0].params.task,/continue delivery_diff/i);
+});
+
 test('read-only check failure stops without dispatching an automatic fix',async()=>{
  const h=harness();h.deps.verifyCommand=async()=>({code:1,output:'failing test'});
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('review',h.ctx);

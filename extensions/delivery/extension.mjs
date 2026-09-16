@@ -194,15 +194,21 @@ export function registerDelivery(pi,schemas,deps={}) {
     const workingEvidence=(paths)=>suppliedWorkingTreeEvidence || !suppliedDiff
       ? d.workingTreeEvidence(root,paths)
       : d.diff(root);
+    const committedEvidence=(paths)=>d.diff(root,s.plan.reviewRange,40000,0,paths);
     const evidence=stage==='spec' && !s.plan.reviewRange
       ? workingEvidence(task.files)
-      : (stage==='quality' || stage==='security') && !s.plan.reviewRange
-        ? workingEvidence()
-        : d.diff(root,s.plan.reviewRange);
+      : stage==='spec' && s.plan.reviewRange
+        ? committedEvidence(task.files)
+        : (stage==='quality' || stage==='security') && !s.plan.reviewRange
+          ? workingEvidence()
+          : d.diff(root,s.plan.reviewRange);
+    const localDiff=s.plan.reviewRange
+      ? `git diff --no-ext-diff ${s.plan.reviewRange.base} ${s.plan.reviewRange.head} -- <path>`
+      : 'git diff --no-ext-diff -- <path>';
     const reviewScope=stage==='spec'
-      ? 'Review evidence is the exact current-task diff and path-scoped tracked/untracked status. Inspect only the current task for acceptance; accepted prior-task changes are preserved baseline unless actual-source inspection demonstrates a regression affecting current acceptance. Do not block because earlier task files are not included.'
+      ? `Review evidence is the exact current-task diff and path-scoped tracked/untracked status. Inspect only the current task for acceptance; accepted prior-task changes are preserved baseline unless actual-source inspection demonstrates a regression affecting current acceptance. For clipped evidence, inspect the approved task paths with ${localDiff}. Do not block because earlier task files are not included.`
       : stage==='quality' || stage==='security'
-        ? 'Review evidence is aggregate. Use available read and bash tools to inspect the complete workspace; run git diff --no-ext-diff -- <path> for clipped or important files. Do not block solely because embedded evidence is truncated; actual source and repository-local git commands can complete the approved scope. Block only when evidence is genuinely inaccessible or material uncertainty remains.'
+        ? `Review evidence is aggregate. Use available read and bash tools to inspect the complete workspace; run ${localDiff} for clipped or important files. Do not block solely because embedded evidence is truncated; actual source and repository-local git commands can complete the approved scope. Block only when evidence is genuinely inaccessible or material uncertainty remains.`
         : '';
     return [
       stage==='coder'?'Implement only this approved task. Follow selected SPARK TDD/debugging/verification skills.':`Read-only review. Do not modify any files. Independent ${stage} review. Inspect actual source and the approved review evidence for current-task acceptance and earlier-task regressions. Later task deliverables are not required yet.`,

@@ -34,18 +34,22 @@ test('working-tree evidence scopes tracked diff and untracked discovery to task 
 test('commit range supplies actual committed diff even on a clean workspace',t=>{
  const d=repo(t);
  for(const value of ['zero','one','two']) {
-  writeFileSync(join(d,'a'),value+'\n');execFileSync('git',['-C',d,'add','a']);
+  writeFileSync(join(d,'a'),value+'\n');
+  if(value==='two')writeFileSync(join(d,'b'),'task two\n');
+  execFileSync('git',['-C',d,'add','-A']);
   execFileSync('git',['-C',d,'-c','user.name=Test','-c','user.email=test@localhost','commit','-qm',value]);
  }
  const range=revisionRange(d,2);assert.match(range.base,/^[a-f0-9]{40}$/);assert.notEqual(range.base,range.head);
  const report=diff(d,range);assert.match(report,/-zero/);assert.match(report,/\+two/);assert.match(report,/one/);
+ const scoped=diff(d,range,Infinity,0,['b']);assert.match(scoped,/task two/);assert.doesNotMatch(scoped,/diff --git a\/a b\/a/);
  assert.throws(()=>revisionRange(d,100),/1.*20|range/i);
  assertCommittedWorkspace(d,range);
  writeFileSync(join(d,'a'),'x'.repeat(60000)+'UNIQUE_TAIL\n');
  assert.throws(()=>assertCommittedWorkspace(d,range),/tracked files/);
  execFileSync('git',['-C',d,'add','a']);execFileSync('git',['-C',d,'-c','user.name=Test','-c','user.email=test@localhost','commit','-qm','large change']);
  assert.throws(()=>assertCommittedWorkspace(d,range),/HEAD changed/);
- const large=revisionRange(d,2);assert.match(diff(d,large),/offset=40000/);
+ const large=revisionRange(d,2);assert.match(diff(d,large),/Embedded diff truncated/);
+ assert.doesNotMatch(diff(d,large),/continue delivery_diff/i);
  assert.match(diff(d,large,40000,40000),/UNIQUE_TAIL/);
  const patch=reviewPatch(d,large);t.after(()=>rmSync(dirname(patch),{recursive:true,force:true}));
  assert.equal(readFileSync(patch,'utf8'),diff(d,large,Infinity));

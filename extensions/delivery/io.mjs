@@ -115,14 +115,15 @@ export function workingTreeEvidence(root,paths) {
   const untracked=git(root,['ls-files','--others','--exclude-standard',...scope]);
   return `STATUS (scoped paths only):\n${status}TRACKED WORKING-TREE DIFF:\n${tracked}UNTRACKED PATHS (scoped; inspect contents with read):\n${untracked}`;
 }
-export function diff(root,range,limit=40000,offset=0) {
-  const status=git(root,['status','--short']);
+export function diff(root,range,limit=40000,offset=0,paths) {
+  const scope=pathspecs(paths);
+  const status=git(root,['status','--short',...scope]);
   if(range && ![range.base,range.head].every(ref=>/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(ref)))throw new Error('Expected pinned commit IDs');
-  const body=git(root,['diff','--no-ext-diff','--no-textconv',...(range?[range.base,range.head]:['HEAD']),'--']);
+  const body=git(root,['diff','--no-ext-diff','--no-textconv',...(range?[range.base,range.head]:['HEAD']),...scope]);
   const history=range?`COMMITTED RANGE ${range.base}..${range.head}\n${git(root,['log','--first-parent','-20','--format=%H %s',`${range.base}..${range.head}`])}\nUntracked files and working-tree edits are NOT part of this committed range.\n`:'';
   const value=`${history}STATUS (paths only; inspect untracked content only for a working-tree review):\n${status}\n${range?'COMMITTED':'TRACKED WORKING-TREE'} DIFF:\n${body}`;
   const slice=value.slice(offset,offset+limit);
-  return value.length>offset+limit ? slice+`\n[Diff truncated; continue delivery_diff at offset=${offset+limit}.]` : slice;
+  return value.length>offset+limit ? slice+`\n[Embedded diff truncated; inspect remaining approved files with repository-local git/read tools.]` : slice;
 }
 export function reviewPatch(root,range) {
   const dir=mkdtempSync(join(tmpdir(),'pi-delivery-review-'));
