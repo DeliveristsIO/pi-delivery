@@ -9,7 +9,7 @@ export default function (pi: ExtensionAPI) {
       Object.fromEntries(['planning','coder','spec','quality','security'].map(role=>[role,Type.Optional(Type.String({maxLength:256,description:'Exact provider/model ID explicitly chosen by the user.'}))])),
       {additionalProperties:false,description:'Omit to inspect configured routes and available models. Changes show a confirmation and preserve retained work.'}
     ))}),
-    resume: Type.Object({taskChecks: Type.Optional(Type.Array(Type.Array(Type.String(), {minItems:1,maxItems:10}), {minItems:1,maxItems:12,description:'Legacy check-order recovery only: derive executable checks for EVERY existing task from the approved source plan. Keeps final checks, task scope and completed coder evidence; shows a correction confirmation.'}))}),
+    resume: Type.Object({taskChecks: Type.Optional(Type.Array(Type.Array(Type.String(), {minItems:1,maxItems:10}), {minItems:1,maxItems:12,description:'Legacy check-order recovery only: derive executable checks for EVERY existing task from the approved source plan. Keeps final checks, task scope and completed coder evidence; shows a correction confirmation. It is separate from correction-bound extension and final-exhaustion inspection.'}))}),
     execute: Type.Object({planFile: Type.Optional(Type.String({description:'Existing Markdown plan under docs/spark/plans/ explicitly requested for execution; no prior registration needed.'}))}),
     diff: Type.Object({ offset: Type.Optional(Type.Integer({minimum:0,description:'Continue a truncated diff from this character offset.'})), commits: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Read the last N committed changes rather than the working-tree diff.' })) }),
     plan: Type.Object({

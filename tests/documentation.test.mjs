@@ -8,6 +8,7 @@ test('orchestration guidance uses real delivery gates rather than direct worker 
  const text=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
  assert.match(text,/delivery_plan/);assert.match(text,/delivery_execute/);assert.match(text,/delivery_resume/);
  assert.match(text,/new corrective plan/i);assert.match(text,/No saved Markdown file is required/);
+ assert.match(text,/Do not generate another corrective plan automatically after final exhaustion/i);
  assert.doesNotMatch(text,/No custom .*setup command is required|Dispatch `delivery-coder`|instruction limit, not mechanical/);
 });
 test('public documentation relative links resolve',()=>{

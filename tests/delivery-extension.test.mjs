@@ -216,18 +216,39 @@ for(const evidence of ['matching','missing','other-reservation','other-snapshot'
  await next.tools.delivery_resume.execute('r',{},null,null,next.ctx);await next.controller.settled();
  assert.equal(next.controller.state().stage,'complete');assert.deepEqual(next.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security']);
 });
-test('exhausted terminal run exposes retained requirements and a corrective-plan path',async()=>{
- const h=harness();const entry=oldRunEntry('blocked',routes,{reports:[{stage:'spec',task:0,report:{status:'changes_requested',summary:'remaining regression',findings:['HIGH a:1 preserve cleared values']}}]});h.entries.push(entry);
+test('final correction exhaustion stops without proposing another plan',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{round:4,correctionPolicy:{maxFixRounds:4,source:'configured'},reason:'Fix/review round limit exhausted (4)',reports:[{stage:'coder',task:0,round:4,snapshot:'hash',runId:'old',report:{status:'approved',summary:'done',findings:[]}}]}));
  await h.events.session_start({},h.ctx);const before=h.controller.state();
- const status=await h.tools.delivery_status.execute();const text=status.content.map(c=>c.text||'').join('\n');
- assert.match(text,/new corrective plan/i);assert.match(text,/delivery_plan/);assert.match(text,/Add one/);assert.match(text,/preserve cleared values/);assert.match(text,/node --test/);assert.match(text,/No saved Markdown file is required/);
- const prompt=await h.events.before_agent_start({systemPrompt:'base'},h.ctx);assert.match(prompt.systemPrompt,/NEXT ACTION:.*delivery_plan/);
- assert.match((await h.tools.delivery_resume.execute('r',{},null,null,h.ctx)).content[0].text,/new corrective plan.*delivery_plan/i);
+ const status=await h.tools.delivery_status.execute();const text=status.content.map(c=>c.text||'').join('\\n');
+ assert.equal(status.details.nextAction.action,'inspect');assert.match(text,/approved correction bound is exhausted/i);assert.doesNotMatch(text,/prepare a new corrective plan/i);
  assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
- await h.tools.delivery_plan.execute('p',{...plan,title:'Correct remaining regression'},null,null,h.ctx);
- await assert.rejects(h.tools.delivery_execute.execute('e',{},null,null,h.ctx),/fresh user reply/i);
- await h.events.input({text:'Approve this corrective plan',source:'interactive'},h.ctx);
- await h.tools.delivery_execute.execute('e',{},null,null,h.ctx);await h.controller.settled();assert.equal(h.controller.state().stage,'complete');
+});
+
+test('legacy exhausted plan adopts configured limit without replacement plan',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{round:2,reason:'Fix/review round limit exhausted (2)',correctionPolicy:undefined}));
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ const state=h.controller.state();
+ assert.deepEqual(state.correctionPolicy,{maxFixRounds:4,source:'confirmed-extension'});assert.ok(state.round>=before.round);
+ assert.deepEqual(state.plan,before.plan);assert.deepEqual(state.routes,before.routes);assert.ok(state.reports.some(r=>r.runId==='old'));
+});
+
+test('declined correction extension preserves exhausted state',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{round:2,reason:'Fix/review round limit exhausted (2)',correctionPolicy:undefined}));
+ await h.events.session_start({},h.ctx);const before=h.controller.state();h.ctx.ui.confirm=async()=>false;
+ await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/not approved/i);
+ assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+
+test('coding budget exhaustion refuses a correction extension without launching a coder',async()=>{
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{round:2,reason:'Fix/review round limit exhausted (2)',correctionPolicy:undefined,coding:{0:{spentMs:60*60000,continuations:1}}}));
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ const result=await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ assert.match(result.content[0].text,/approved correction bound is exhausted|inspect/i);assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
 test('unresolved children never receive a corrective-plan next action',async()=>{
  const h=harness();h.entries.push(oldRunEntry('blocked',routes,{active:{id:null,dir:null,stage:'coder',model:routes.coder}}));
@@ -686,7 +707,7 @@ test('runtime failed child cannot become approved from prose',async()=>{
  const h=harness();h.deps.readOutcome=()=>{throw new Error('child failed');};await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('id',plan,null,null,h.ctx);
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/child failed/);
 });
-const oldRunEntry=(stage,oldRoutes,extra={})=>({type:'custom',customType:'delivery-mode-v1',data:{version:1,enabled:true,stage,task:0,round:2,plan,routes:oldRoutes,snapshot:'hash',active:null,reports:[{stage:'security',task:0,round:2,snapshot:'hash',runId:'old',report:{status:'approved',summary:'done',findings:[]}}],reason:stage==='blocked'?'Two fix/review rounds exhausted':'',workspace:'/repo',owner:'session',...extra}});
+const oldRunEntry=(stage,oldRoutes,extra={})=>({type:'custom',customType:'delivery-mode-v1',data:{version:1,enabled:true,stage,task:0,round:2,plan,routes:oldRoutes,timeouts:timeoutPolicy(),snapshot:'hash',active:null,reports:[{stage:'security',task:0,round:2,snapshot:'hash',runId:'old',report:{status:'approved',summary:'done',findings:[]}}],reason:stage==='blocked'?'Two fix/review rounds exhausted':'',workspace:'/repo',owner:'session',...extra}});
 const excludedModelError=model=>`Requested subagent model '${model}' is excluded and cannot be replaced by a fallback (reason: Connection error.; expires: 2026-09-16T12:59:57.188Z).`;
 test('excluded model preflight can be closed without replay or lost evidence, then routes changed',async()=>{
  const h=harness(),rpc=h.deps.rpc;
