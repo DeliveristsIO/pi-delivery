@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, correctionPolicy, fixRoundLimit } from '../extensions/delivery/policy.mjs';
+import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, correctionPolicy, fixRoundLimit, createExecutionAuthority, executionAuthorityMatches } from '../extensions/delivery/policy.mjs';
 
 export const routes = { planning: 'openai-codex/gpt-6-astra', coder: 'ollama-cloud/coder', spec: 'anthropic/reviewer', quality: 'anthropic/reviewer', security: 'openai-codex/reviewer' };
 export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: 'Implement fixture', files: ['src/a.js'], checks: ['node --test'], acceptance: ['Works'] }], checks: ['node --test'], risk: 'low', security: true };
@@ -41,6 +41,16 @@ test('approval is bound to plan and routes; no approval means no work', () => {
   const a=approve(s,routes,'tree');
   assert.equal(a.stage,'coder'); assert.equal(a.snapshot,'tree');
   assert.notEqual(a.routes,routes);
+});
+test('execution authority is bound to the exact user, session, repository, proposal and material policy', () => {
+  const binding={turn:'turn-1',userTurn:'Implement the fixture',session:'session',repository:'/repo',plan,workspace:'tree',routes,timeouts:{coderMs:1},corrections:{maxFixRounds:4},gitPolicy:{reviewPolicy:'balanced'}};
+  const authority=createExecutionAuthority(binding);
+  assert.equal(executionAuthorityMatches(authority,binding),true);
+  for(const [key,value] of [
+    ['turn','turn-2'],['userTurn','Implement something else'],['session','other'],['repository','/other'],['plan',{...plan,title:'Changed'}],['workspace','other'],
+    ['routes',{...routes,coder:'other/model'}],['timeouts',{coderMs:2}],['corrections',{maxFixRounds:5}],['gitPolicy',{reviewPolicy:'strict'}]
+  ]) assert.equal(executionAuthorityMatches(authority,{...binding,[key]:value}),false,key);
+  assert.throws(()=>createExecutionAuthority({...binding,userTurn:''}),/user turn/i);
 });
 test('full stage order requires each passing result and host verification', () => {
   let s=approve({...initialState(), plan, stage:'awaiting-approval'}, routes,'tree');

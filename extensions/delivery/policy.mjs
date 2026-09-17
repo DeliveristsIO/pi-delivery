@@ -34,6 +34,16 @@ export function validatePlan(input) {
   check(input && typeof input==='object' && JSON.stringify(input).length<=64000, 'Invalid or oversized plan');
   check(text(input.title,200), 'Invalid plan title');
   check(input.mode===undefined || ['implementation','review'].includes(input.mode), 'Invalid plan mode');
+  if(input.start!==undefined)check(typeof input.start==='boolean','start must be a boolean');
+  if(input.executionIntent!==undefined) {
+    check(input.mode!=='review' && input.executionIntent && typeof input.executionIntent==='object' && !Array.isArray(input.executionIntent),'executionIntent is only valid for implementation plans');
+    check(JSON.stringify(Object.keys(input.executionIntent).sort())===JSON.stringify(['kind','userTurn']),'executionIntent contains unknown or missing fields');
+    check(input.executionIntent.kind==='explicit-implementation' && text(input.executionIntent.userTurn,16000) && !input.executionIntent.userTurn.includes('\0'),'Invalid executionIntent attestation');
+  }
+  if(input.reviewAttachment!==undefined) {
+    check(input.mode==='review' && input.reviewAttachment && typeof input.reviewAttachment==='object' && !Array.isArray(input.reviewAttachment),'reviewAttachment is only valid for read-only review plans');
+    check(JSON.stringify(Object.keys(input.reviewAttachment))===JSON.stringify(['kind']) && input.reviewAttachment.kind==='retained-recovery','Invalid reviewAttachment attestation');
+  }
   if(input.changeType!==undefined)check(input.mode!=='review' && CHANGE_TYPES.includes(input.changeType),'changeType must be feature, bug, or chore and is only valid for implementation plans');
   if(input.reviewPolicy!==undefined)check(input.mode!=='review' && REVIEW_POLICIES.includes(input.reviewPolicy),'reviewPolicy must be balanced or strict and is only valid for implementation plans');
   if(input.commits!==undefined)check(input.mode==='review' && Number.isInteger(input.commits) && input.commits>=1 && input.commits<=20,'commits requires review mode and 1–20 commits');
@@ -122,6 +132,17 @@ export function fixRoundLimit(state) {
   check(policy && typeof policy==='object' && !Array.isArray(policy),'Invalid correction policy');
   for(const key of Object.keys(policy))check(key==='maxFixRounds' || key==='source',`Unknown correction policy setting: ${key}`);
   return correctionPolicy({maxFixRounds:policy.maxFixRounds}).maxFixRounds;
+}
+const authorityFields=['turn','userTurn','session','repository','plan','workspace','routes','timeouts','corrections','gitPolicy'];
+function authorityBinding(binding) {return Object.fromEntries(authorityFields.map(key=>[key,structuredClone(binding?.[key] ?? null)]));}
+export function createExecutionAuthority(binding) {
+  check(text(binding?.turn,1024) && text(binding?.userTurn,16000) && !binding.userTurn.includes('\0'),'Execution authority requires an exact real-user turn');
+  check(text(binding?.session,1024) && text(binding?.repository,4096),'Execution authority requires session and repository identity');
+  check(binding.plan && binding.workspace && binding.routes && binding.timeouts && binding.corrections,'Execution authority requires complete proposal bindings');
+  return {version:1,...authorityBinding(binding)};
+}
+export function executionAuthorityMatches(authority,binding) {
+  return authority?.version===1 && JSON.stringify(authorityBinding(authority))===JSON.stringify(authorityBinding(binding));
 }
 export function initialState() {
   return {version:1,enabled:false,stage:'planning',task:0,round:0,plan:null,routes:null,snapshot:null,active:null,reports:[],feedback:'',reason:'',gitPolicy:null,optimizerPasses:{},optimizerBypass:false,reviewedContentSnapshot:null,reviewContentCandidate:null};

@@ -14,10 +14,15 @@ export default function (pi: ExtensionAPI) {
     diff: Type.Object({ offset: Type.Optional(Type.Integer({minimum:0,description:'Continue a truncated diff from this character offset.'})), commits: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Read the last N committed changes rather than the working-tree diff.' })) }),
     plan: Type.Object({
       planFile: Type.Optional(Type.String({description:'Authoritative existing Markdown plan. After delivery_execute adopts it, derive its tasks here without changing scope; execution starts without repeated approval.'})),
-      mode: Type.String({enum:['implementation','review'],description:'Infer from the request/context: review runs immediately without a coder; implementation waits for conversational approval.'}),
+      mode: Type.String({enum:['implementation','review'],description:'Infer from request and conversation: requested review runs read-only; explicit implementation intent starts the displayed unchanged proposal, while planning-only or ambiguous intent does not.'}),
       changeType: Type.Optional(Type.String({enum:['feature','bug','chore'],description:'Required for fresh implementation plans; omitted for review-plan schema compatibility.'})),
       reviewPolicy: Type.Optional(Type.String({enum:['balanced','strict'],description:'Implementation review lifecycle: balanced (default) combines specification and quality review; strict opts into separate reviews.'})),
-      start: Type.Optional(Type.Boolean({description:'Set false only when the user requested a plan without execution.'})),
+      start: Type.Optional(Type.Boolean({description:'Set false only when the user requested planning without execution. It always prevents launch.'})),
+      executionIntent: Type.Optional(Type.Object({
+        kind: Type.Literal('explicit-implementation'),
+        userTurn: Type.String({minLength:1,maxLength:16000,description:'Exact current interactive/RPC user turn whose conversational meaning explicitly requests implementation. Never attest questions, planning-only requests, rejection, deferral or ambiguity.'})
+      }, {additionalProperties:false,description:'Planner attestation for explicit implementation intent. The controller binds it to this exact proposal, session, repository, workspace, routes, budgets, correction and review/security policy, then starts only the unchanged displayed plan.'})),
+      reviewAttachment: Type.Optional(Type.Object({kind:Type.Literal('retained-recovery')},{additionalProperties:false,description:'Attach this requested read-only review to a matching failed retained implementation review. The controller verifies task scope, candidate, session, repository, routes and budgets; standalone reviews must omit it.'})),
       commits: Type.Optional(Type.Integer({minimum:1,maximum:20,description:'In review mode, pin the last N commits for validation.'})),
       title: Type.String({ maxLength: 200 }),
       tasks: Type.Array(Type.Object({

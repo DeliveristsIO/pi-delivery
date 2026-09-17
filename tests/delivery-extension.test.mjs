@@ -89,7 +89,7 @@ for(const stage of ['awaiting-approval','complete'])test(`resume in ${stage} ret
  const h=harness(),notifications=[];h.entries.push(oldRunEntry(stage,routes));h.ctx.ui.notify=(...args)=>notifications.push(args);
  await h.events.session_start({},h.ctx);const before=h.controller.state();
  await h.commands.delivery.handler('resume',h.ctx);await h.commands.delivery.handler('resume',h.ctx);
- const status=await h.tools.delivery_status.execute();assert.equal(status.details.nextAction.action,stage==='complete'?'complete':'approve');
+ const status=await h.tools.delivery_status.execute();assert.equal(status.details.nextAction.action,stage==='complete'?'complete':'decide');
  assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,[]);assert.deepEqual(notifications,[]);
 });
 test('status counts completed task reviews while final verification is still pending',async()=>{
@@ -386,6 +386,68 @@ test('approved task content race before commit is rejected and re-reviewed witho
  assert.equal(h.controller.state().stage,'complete');assert.equal(qualityReports.length,2);
  assert.equal(commitAttempts,2);assert.equal(adopted,1);assert.equal(h.controller.state().gitPolicy.commits.length,1);
  assert.equal(qualityReports[0].report.reviewedContentSnapshot,'accepted-content');assert.equal(qualityReports[1].report.reviewedContentSnapshot,'raced-content');
+});
+test('explicit implementation intent displays, journals and starts the unchanged proposal immediately',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ const userTurn='Implement the fixture now';
+ await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ const response=await h.tools.delivery_plan.execute('id',{...plan,executionIntent:{kind:'explicit-implementation',userTurn}},null,null,h.ctx);
+ assert.match(response.content[0].text,/started/i);assert.ok(h.messages.some(message=>message.customType==='delivery' && /Fixture/.test(message.content)));
+ assert.ok(h.entries.some(entry=>entry.data.executionAuthority?.userTurn===userTurn));
+ await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.ok(h.calls.some(c=>c.params?.agent==='delivery-coder'));
+});
+test('planning-only, ambiguous, rejecting, deferring, questioning and absent intent do not launch',async()=>{
+ for(const [text,start] of [['Plan this change',false],['Maybe change this',undefined],['Do not implement this',undefined],['Wait until later',undefined],['Could we implement this?',undefined],['',undefined]]) {
+  const h=harness();await h.events.session_start({},h.ctx);
+  if(text)await h.events.input({text,source:'interactive'},h.ctx);
+  const response=await h.tools.delivery_plan.execute('id',{...plan,...(start===false?{start:false}:{})},null,null,h.ctx);
+  assert.match(response.content[0].text,/Plan ready/i);assert.equal(h.controller.state().stage,'awaiting-approval');assert.equal(h.calls.filter(c=>c.method==='spawn').length,0,text||'absent');
+ }
+});
+test('implementation attestation must match the exact real-user turn and start false always wins',async()=>{
+ for(const candidate of [
+  {text:'Implement the fixture',intent:{kind:'explicit-implementation',userTurn:'an older request'}},
+  {text:'Implement the fixture',intent:{kind:'explicit-implementation',userTurn:'Implement the fixture'},start:false},
+  {text:'Implement the fixture',intent:undefined}
+ ]) {
+  const h=harness();await h.events.session_start({},h.ctx);await h.events.input({text:candidate.text,source:'interactive'},h.ctx);
+  const response=await h.tools.delivery_plan.execute('id',{...plan,...(candidate.intent?{executionIntent:candidate.intent}:{}),...(candidate.start===false?{start:false}:{})},null,null,h.ctx);
+  assert.match(response.content[0].text,/Plan ready/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ }
+});
+for(const changed of ['workspace','routes','timeouts','corrections'])test(`explicit intent is invalidated when ${changed} changes before launch`,async()=>{
+ const h=harness({version:1,routes:structuredClone(routes),corrections:{maxFixRounds:4},repos:['/repo']});await h.events.session_start({},h.ctx);
+ const userTurn='Implement the fixture';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ const rpc=h.deps.rpc;h.deps.rpc=async(...args)=>{if(args[1]==='ping') {
+  if(changed==='workspace')h.deps.fingerprint=()=> 'changed';
+  if(changed==='routes')h.config.routes.coder=routes.spec;
+  if(changed==='timeouts')h.config.timeouts={coderMs:30*60000};
+  if(changed==='corrections')h.config.corrections={maxFixRounds:3};
+ } return rpc(...args);};
+ await assert.rejects(h.tools.delivery_plan.execute('id',{...plan,executionIntent:{kind:'explicit-implementation',userTurn}},null,null,h.ctx),/changed|policy/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('a new rejecting user turn during pre-launch ping invalidates explicit intent',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ const userTurn='Implement the fixture';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ let releasePing,atPing;const pingReached=new Promise(resolve=>{atPing=resolve;});
+ const rpc=h.deps.rpc;h.deps.rpc=async(...args)=>{
+  if(args[1]==='ping'){atPing();await new Promise(resolve=>{releasePing=resolve;});}
+  return rpc(...args);
+ };
+ const launching=h.tools.delivery_plan.execute('id',{...plan,executionIntent:{kind:'explicit-implementation',userTurn}},null,null,h.ctx);
+ await pingReached;await h.events.input({text:'Wait, do not implement this',source:'interactive'},h.ctx);releasePing();
+ await assert.rejects(launching,/authority|user turn|intent/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('one user-turn authority cannot be rebound to a materially changed second candidate',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);const userTurn='Implement the fixture';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ const rpc=h.deps.rpc;let first=true;h.deps.rpc=async(...args)=>{if(args[1]==='ping'&&first){first=false;h.deps.fingerprint=()=> 'changed';}return rpc(...args);};
+ await assert.rejects(h.tools.delivery_plan.execute('first',{...plan,executionIntent:{kind:'explicit-implementation',userTurn}},null,null,h.ctx),/changed/i);
+ h.deps.fingerprint=()=> 'hash';
+ const response=await h.tools.delivery_plan.execute('second',{...plan,title:'Different candidate',executionIntent:{kind:'explicit-implementation',userTurn}},null,null,h.ctx);
+ assert.match(response.content[0].text,/not started/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
 test('proposal alone cannot launch; approval runs all stages and verification',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
@@ -887,6 +949,185 @@ test('prior run evidence stays in session history and out of the new active repo
  assert.equal(state.priorRun?.reports,1);
  assert.ok(h.entries.some(e=>JSON.stringify(e.data).includes('"runId":"old"')));
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('attached recovery review finding restores the complete retained task and finishes remaining work without coder replay',async()=>{
+ const tasks=Array.from({length:5},(_,i)=>({title:`Task ${i+1}`,instructions:`Implement ${i+1}`,files:[`task-${i+1}.js`],checks:[`check-${i+1}`],acceptance:[`task ${i+1} works`],sensitive:false}));
+ const implementation={title:'Quento',mode:'implementation',changeType:'feature',reviewPolicy:'balanced',tasks,checks:['final-gate'],risk:'low',security:false};
+ const retained=oldRunEntry('blocked',routes,{plan:implementation,task:0,round:0,reason:'Child quality-failed failed; attempt closed. review infrastructure failed',failedRun:{id:'quality-failed',state:'failed',stage:'quality',task:0,round:0,model:routes.quality,error:'review infrastructure failed'},correctionPolicy:{maxFixRounds:4,source:'configured'},coding:{0:{spentMs:1234,continuations:0}},connectionRetries:{'0:0:quality':{count:1,spentMs:50}},checks:[{command:'check-1',code:0}],reports:[
+  {stage:'coder',task:0,round:0,snapshot:'hash',runId:'task-1-coder',report:{status:'approved',summary:'Task 1 implemented',findings:[]}},
+  {stage:'checks',task:0,round:0,snapshot:'hash',report:{status:'approved',summary:'checks pass',findings:[]}}
+ ],gitPolicy:{changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/quento',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]}});
+ retained.data.snapshot='retained-hash';retained.data.reports=retained.data.reports.map(entry=>({...entry,snapshot:'retained-hash'}));
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});h.entries.push(retained);h.deps.fingerprint=(_root,options)=>options.scope.length===5?'retained-hash':'review-hash';h.deps.branchState=()=>({branch:'feature/quento',head:'hash',defaultBranch:'main',clean:false,status:' M task-1.js'});
+ let outcomes=0;h.deps.readOutcome=()=>++outcomes===1
+  ? {status:'changes_requested',summary:'Task 1 defect',findings:['high task-1.js:1 incorrect answer; fix calculation']}
+  : {status:'approved',summary:'ok',findings:[]};
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Run a recovery review of the retained Task 1 work',source:'interactive'},h.ctx);
+ const review={title:'Quento Task 1 recovery review',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review retained Task 1',instructions:'Review the retained implementation only',files:['task-1.js'],acceptance:['Task 1 is correct']}],checks:[],risk:'low',security:false};
+ await h.tools.delivery_plan.execute('review',review,null,null,h.ctx);await h.controller.settled();
+ const state=h.controller.state(),spawns=h.calls.filter(call=>call.method==='spawn');
+ assert.equal(state.stage,'complete',JSON.stringify({reason:state.reason,task:state.task,round:state.round,active:state.active,retained:Boolean(state.retainedRun)}));assert.equal(state.plan.title,'Quento');assert.equal(state.plan.tasks.length,5);assert.deepEqual(state.plan.checks,['final-gate']);
+ assert.ok(state.coding[0].spentMs>=1234);assert.equal(state.retainedRun.state.coding[0].spentMs,1234);assert.deepEqual(state.connectionRetries['0:0:quality'],{count:1,spentMs:50});assert.equal(state.correctionPolicy.maxFixRounds,4);
+ assert.equal(state.gitPolicy.workingBranch,'feature/quento');assert.equal(state.round,0);assert.ok(state.reports.some(entry=>entry.reviewAttachment?.status==='changes_requested'));
+ assert.equal(spawns.filter(call=>call.params.agent==='delivery-coder' && /Implement only this approved task/.test(call.params.task)).length,5);
+ assert.equal(spawns[0].params.agent,'delivery-reviewer');assert.equal(spawns[1].params.agent,'delivery-coder');assert.match(spawns[1].params.task,/Task 1 defect/);
+ assert.ok(spawns.some(call=>call.params.task.includes('Task 5')));assert.ok(state.reports.some(entry=>entry.stage==='final-checks'));
+});
+test('attached recovery review approval resumes after the failed review without replaying accepted coding',async()=>{
+ const tasks=[1,2].map(i=>({title:`Task ${i}`,instructions:`Implement ${i}`,files:[`task-${i}.js`],checks:[`check-${i}`],acceptance:[`task ${i} works`],sensitive:false}));
+ const implementation={title:'Retained approval',mode:'implementation',changeType:'feature',reviewPolicy:'balanced',tasks,checks:['final-gate'],risk:'low',security:false};
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{plan:implementation,task:0,round:0,reason:'Child quality-failed failed; attempt closed. review infrastructure failed',failedRun:{id:'quality-failed',state:'failed',stage:'quality',task:0,round:0,model:routes.quality,error:'review infrastructure failed'},correctionPolicy:{maxFixRounds:4,source:'configured'},coding:{0:{spentMs:500,continuations:0}},reports:[{stage:'coder',task:0,round:0,snapshot:'hash',runId:'accepted-coder',report:{status:'approved',summary:'implemented',findings:[]}}],gitPolicy:{changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/retained',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]}}));
+ h.deps.branchState=()=>({branch:'feature/retained',head:'hash',defaultBranch:'main',clean:false,status:' M task-1.js'});
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Approve the retained work through a recovery review',source:'interactive'},h.ctx);
+ await h.tools.delivery_plan.execute('review',{title:'Recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review Task 1',instructions:'Review only',files:['task-1.js'],acceptance:['correct']}],checks:[],risk:'low',security:false},null,null,h.ctx);await h.controller.settled();
+ const implementationCoders=h.calls.filter(call=>call.method==='spawn' && call.params.agent==='delivery-coder' && /Implement only this approved task/.test(call.params.task));
+ assert.equal(h.controller.state().stage,'complete');assert.equal(implementationCoders.length,1);assert.match(implementationCoders[0].params.task,/Task 2/);assert.equal(h.controller.state().coding[0].spentMs,500);
+ assert.equal(h.controller.state().failedRun,undefined,'resolved recovery failure is consumed');
+});
+test('recovery attachment rejects a stale failed review after a later round or blocker',async()=>{
+ const recovery={title:'Stale recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ for(const extra of [
+  {round:2,reason:'Child old failed; attempt closed. failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'old',state:'failed',stage:'quality',task:0,round:1,model:routes.quality,error:'failed'}},
+  {round:1,reason:'Fix/review round limit exhausted (4) after old',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'old',state:'failed',stage:'quality',task:0,round:1,model:routes.quality,error:'failed'}},
+  {round:1,reason:'HEAD changed after old',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'old',state:'failed',stage:'quality',task:0,round:1,model:routes.quality,error:'failed'}},
+  {round:1,reason:'Child failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'old',state:'failed',stage:'quality',task:0,round:1,model:routes.quality,error:'failed'}}
+ ]) {
+  const h=harness();h.entries.push(oldRunEntry('blocked',routes,extra));await h.events.session_start({},h.ctx);await h.events.input({text:'review retained work',source:'interactive'},h.ctx);
+  await assert.rejects(h.tools.delivery_plan.execute('review',recovery,null,null,h.ctx),/matching failed implementation review/i);
+  assert.equal(h.calls.filter(call=>call.method==='spawn').length,0);
+ }
+});
+test('strict optimizer recovery resumes at specification review before quality without coder replay',async()=>{
+ const task={title:'Retained strict task',instructions:'Already implemented',files:['task-1.js'],checks:['check-1'],acceptance:['strict behavior works'],sensitive:false};
+ const implementation={title:'Strict optimizer recovery',mode:'implementation',changeType:'feature',reviewPolicy:'strict',tasks:[task],checks:['final-gate'],risk:'low',security:false};
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{plan:implementation,task:0,round:0,reason:'Child optimizer-failed failed; attempt closed. optimizer infrastructure failed',failedRun:{id:'optimizer-failed',state:'failed',stage:'optimizer',task:0,round:0,model:routes.coder,error:'optimizer infrastructure failed'},correctionPolicy:{maxFixRounds:4,source:'configured'},coding:{0:{spentMs:500,continuations:0}},reports:[
+  {stage:'coder',task:0,round:0,snapshot:'hash',runId:'accepted-coder',report:{status:'approved',summary:'implemented',findings:[]}},
+  {stage:'checks',task:0,round:0,snapshot:'hash',report:{status:'approved',summary:'checks pass',findings:[]}}
+ ],gitPolicy:{changeType:'feature',reviewPolicy:'strict',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/retained',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]}}));
+ h.deps.branchState=()=>({branch:'feature/retained',head:'hash',defaultBranch:'main',clean:false,status:' M task-1.js'});
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Run the strict retained recovery review',source:'interactive'},h.ctx);
+ await h.tools.delivery_plan.execute('review',{title:'Strict recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review retained task',instructions:'Review only',files:['task-1.js'],acceptance:['correct']}],checks:[],risk:'low',security:false},null,null,h.ctx);await h.controller.settled();
+ const spawns=h.calls.filter(call=>call.method==='spawn');
+ assert.equal(h.controller.state().stage,'complete');assert.equal(spawns.filter(call=>call.params.agent==='delivery-coder').length,0);
+ assert.match(spawns[0].params.task,/Independent spec review/);assert.match(spawns[1].params.task,/Independent quality review/);
+ assert.deepEqual(h.controller.state().reports.filter(report=>report.task===0 && ['spec','quality'].includes(report.stage)).map(report=>report.stage).slice(-2),['spec','quality']);
+});
+test('attached recovery reviewer uses the retained implementation contract and balanced stage semantics',async()=>{
+ const tasks=[
+  {title:'Accepted Task 1',instructions:'Already implemented',files:['task-1.js'],checks:['check-1'],acceptance:['first retained requirement'],sensitive:false},
+  {title:'Retained Task 2',instructions:'Verify the original retained behavior',files:['task-2.js'],checks:['retained-task-check'],acceptance:['original retained acceptance sentinel'],sensitive:false}
+ ];
+ const implementation={title:'Original retained contract',mode:'implementation',changeType:'feature',reviewPolicy:'balanced',tasks,checks:['retained-final-gate'],risk:'low',security:false};
+ const retainedReports=[
+  {stage:'quality',task:0,round:0,snapshot:'hash',runId:'accepted-task-1',report:{status:'approved',summary:'Task 1 accepted',findings:[]}},
+  {stage:'checks',task:1,round:1,snapshot:'hash',report:{status:'approved',summary:'retained checks pass',findings:[]},checks:[{command:'retained-task-check',code:0}]}
+ ];
+ const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
+ h.entries.push(oldRunEntry('blocked',routes,{plan:implementation,task:1,round:1,reason:'Child optimizer-failed failed; attempt closed. optimizer infrastructure failed',feedback:'retained actionable feedback sentinel',checks:[{command:'retained-task-check',code:0}],reports:retainedReports,failedRun:{id:'optimizer-failed',state:'failed',stage:'optimizer',task:1,round:1,model:routes.coder,error:'optimizer infrastructure failed'},correctionPolicy:{maxFixRounds:4,source:'configured'},gitPolicy:{changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/retained',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]}}));
+ h.deps.fingerprint=(_root,options)=>options.scope.includes('task-2.js')?'hash':'other';
+ h.deps.branchState=()=>({branch:'feature/retained',head:'hash',defaultBranch:'main',clean:false,status:' M task-2.js'});
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Run the retained Task 2 recovery review',source:'interactive'},h.ctx);
+ const recovery={title:'Watered-down replacement',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Shallow review',instructions:'Ignore original details',files:['task-2.js'],acceptance:['watered down acceptance sentinel']}],checks:[],risk:'low',security:false};
+ await h.tools.delivery_plan.execute('review',recovery,null,null,h.ctx);await h.controller.settled();
+ const prompt=h.calls.find(call=>call.method==='spawn').params.task;
+ assert.match(prompt,/Read-only review/);assert.match(prompt,/combined specification and code-quality/);
+ assert.match(prompt,/Original retained contract/);assert.match(prompt,/Retained Task 2/);assert.match(prompt,/original retained acceptance sentinel/);
+ assert.match(prompt,/retained-task-check/);assert.match(prompt,/retained-final-gate/);assert.match(prompt,/Accepted Task 1/);assert.match(prompt,/retained actionable feedback sentinel/);
+ assert.doesNotMatch(prompt,/watered down acceptance sentinel|Ignore original details/);
+});
+test('recovery review attachment requires the exact failed task scope',async()=>{
+ const retainedPlan={...plan,tasks:[{...plan.tasks[0],files:['a','b']} ]};
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{plan:retainedPlan,reason:'Child review-failed failed; attempt closed. infrastructure failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'review-failed',state:'failed',stage:'quality',task:0,round:0,model:routes.quality,error:'infrastructure failed'}}));
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Review only a subset',source:'interactive'},h.ctx);
+ const subset={title:'Subset recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ await assert.rejects(h.tools.delivery_plan.execute('review',subset,null,null,h.ctx),/exact|scope|matching/i);
+ assert.equal(h.calls.filter(call=>call.method==='spawn').length,0);assert.equal(h.controller.state().plan.title,'Fixture');
+});
+test('aggregate recovery review attachment requires the complete implementation scope',async()=>{
+ const retainedPlan={...plan,tasks:[
+  {...plan.tasks[0],title:'One',files:['a']},
+  {...plan.tasks[0],title:'Two',files:['b']}
+ ]};
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{plan:retainedPlan,task:1,reason:'Child aggregate-failed failed; attempt closed. infrastructure failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'aggregate-failed',state:'failed',stage:'aggregate-quality',task:1,round:0,model:routes.quality,error:'infrastructure failed'}}));
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Review only the last task',source:'interactive'},h.ctx);
+ const subset={title:'Aggregate subset',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review',instructions:'Review only',files:['b'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ await assert.rejects(h.tools.delivery_plan.execute('review',subset,null,null,h.ctx),/exact|scope|matching/i);
+ assert.equal(h.calls.filter(call=>call.method==='spawn').length,0);assert.equal(h.controller.state().plan.title,'Fixture');
+});
+test('aggregate recovery requires one full-scope report rather than split task reviews',async()=>{
+ const retainedPlan={...plan,tasks:[
+  {...plan.tasks[0],title:'One',files:['a']},
+  {...plan.tasks[0],title:'Two',files:['b']}
+ ]};
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{plan:retainedPlan,task:1,reason:'Child aggregate-failed failed; attempt closed. infrastructure failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'aggregate-failed',state:'failed',stage:'aggregate-quality',task:1,round:0,model:routes.quality,error:'infrastructure failed'}}));
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Run a full aggregate recovery review',source:'interactive'},h.ctx);
+ const split={title:'Split aggregate recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[
+  {title:'Review A',instructions:'Review A',files:['a'],acceptance:['correct']},
+  {title:'Review B',instructions:'Review B',files:['b'],acceptance:['correct']}
+ ],checks:[],risk:'low',security:false};
+ await assert.rejects(h.tools.delivery_plan.execute('review',split,null,null,h.ctx),/aggregate|one|single|matching/i);
+ assert.equal(h.calls.filter(call=>call.method==='spawn').length,0);assert.equal(h.controller.state().plan.title,'Fixture');
+});
+test('security recovery requires security policy and resumes only from a security-route report',async()=>{
+ const retainedPlan={...plan,mode:'implementation',security:true,tasks:[{...plan.tasks[0],sensitive:true}]};
+ const retained=oldRunEntry('blocked',routes,{plan:retainedPlan,round:0,reason:'Child security-failed failed; attempt closed. infrastructure failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'security-failed',state:'failed',stage:'security',task:0,round:0,model:routes.security,error:'infrastructure failed'}});
+ const h=harness();h.entries.push(retained);let outcome=0;h.deps.readOutcome=()=>++outcome===1
+  ? {status:'changes_requested',summary:'security defect',findings:['high a:1 unsafe behavior; enforce validation']}
+  : {status:'approved',summary:'ok',findings:[]};
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Run the retained security recovery review',source:'interactive'},h.ctx);
+ const recovery={title:'Security recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review security',instructions:'Review security only',files:['a'],acceptance:['secure']}],checks:[],risk:'low',security:false};
+ await assert.rejects(h.tools.delivery_plan.execute('review',recovery,null,null,h.ctx),/security|matching/i);
+ await h.tools.delivery_plan.execute('review',{...recovery,security:true},null,null,h.ctx);await h.controller.settled();
+ const spawns=h.calls.filter(call=>call.method==='spawn');
+ assert.equal(spawns[0].params.agent,'delivery-security');assert.equal(spawns[0].params.model,routes.security);
+ assert.equal(spawns[1].params.agent,'delivery-coder');assert.match(spawns[1].params.task,/security defect/);
+ assert.equal(h.controller.state().stage,'complete');
+});
+test('legacy pre-authorization commit failure reuses only unchanged accepted evidence after reload',async()=>{
+ const gitPolicy={changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/fixture',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]};
+ const pendingCommit={phase:'preparation',task:0,round:2,snapshot:'hash',reviewedContentSnapshot:'hash',files:['a']};
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{gitPolicy,reviewedContentSnapshot:{task:0,aggregate:false,snapshot:'hash'},pendingCommit,reason:'Commit failed before staging'}));
+ let commits=0;h.deps.commitApprovedTask=()=>{commits++;return {hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:'hash'};};
+ await h.events.session_start({},h.ctx);const result=await h.tools.delivery_resume.execute('resume',{},null,null,h.ctx);await h.controller.settled();
+ assert.match(result.content[0].text,/unchanged accepted review evidence/);assert.equal(commits,1);assert.equal(h.controller.state().pendingCommit,undefined);assert.equal(h.calls.filter(call=>call.params?.agent==='delivery-coder').length,0);
+});
+test('legacy recovery review lineage is reconstructed only from matching same-session repository journal evidence',async()=>{
+ const retained=oldRunEntry('blocked',routes,{reason:'Child review-failed failed; attempt closed. infrastructure failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'review-failed',state:'failed',stage:'quality',task:0,round:2,model:routes.quality,error:'infrastructure failed'}});
+ const reviewPlan={title:'Legacy recovery',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ const reviewState={version:1,enabled:true,stage:'spec',task:0,round:0,plan:reviewPlan,routes,timeouts:timeoutPolicy(),correctionPolicy:{maxFixRounds:4,source:'default'},snapshot:'hash',active:null,reports:[],priorRun:{stage:'blocked',task:0,round:2,reports:1},reviewProvenance:{version:1,kind:'retained-recovery',session:'session',repository:'/repo',candidateFingerprint:'hash',reviewCandidateFingerprint:'hash',reviewFiles:['a'],failedRun:{id:'review-failed',stage:'quality',task:0,round:2},routes,timeouts:timeoutPolicy(),correctionPolicy:{maxFixRounds:4,source:'default'}},workspace:'/repo',owner:'session'};
+ const h=harness();h.entries.push(retained,structuredClone(retained),{type:'custom',customType:'delivery-mode-v1',data:reviewState});await h.events.session_start({},h.ctx);
+ const state=h.controller.state();assert.equal(state.retainedRun.source,'trusted-journal');assert.equal(state.retainedRun.state.plan.title,'Fixture');assert.equal(state.reviewAttachment.legacy,true);assert.equal(state.resumeStage,'quality');
+});
+test('persisted standalone same-scope review cannot attach to a blocked implementation after restart',async()=>{
+ const retained=oldRunEntry('blocked',routes,{reason:'Child review-failed failed; attempt closed. infrastructure failed',failedRun:{id:'review-failed',state:'failed',stage:'quality',task:0,round:0,model:routes.quality,error:'infrastructure failed'}});
+ const reviewPlan={title:'Standalone same-file review',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ const reviewState={version:1,enabled:true,stage:'spec',task:0,round:0,plan:reviewPlan,routes,timeouts:timeoutPolicy(),correctionPolicy:{maxFixRounds:4,source:'default'},snapshot:'hash',active:null,reports:[],priorRun:{stage:'blocked',task:0,round:0,reports:1},reviewProvenance:{version:1,kind:'standalone'},workspace:'/repo',owner:'session'};
+ const h=harness();h.entries.push(retained,{type:'custom',customType:'delivery-mode-v1',data:reviewState});await h.events.session_start({},h.ctx);
+ assert.equal(h.controller.state().retainedRun,undefined);assert.equal(h.controller.state().reviewAttachment,undefined);assert.equal(h.controller.state().plan.mode,'review');
+});
+test('legacy recovery lineage rejects changed material bindings',async()=>{
+ const retained=oldRunEntry('blocked',routes,{reason:'Child review-failed failed; attempt closed. infrastructure failed',failedRun:{id:'review-failed',state:'failed',stage:'quality',task:0,round:0,model:routes.quality,error:'infrastructure failed'}});
+ const reviewPlan={title:'Legacy recovery',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ const changedRoutes={...routes,coder:routes.spec};
+ const reviewState={version:1,enabled:true,stage:'blocked',task:0,round:0,plan:reviewPlan,routes:changedRoutes,timeouts:timeoutPolicy(),correctionPolicy:{maxFixRounds:4,source:'default'},snapshot:'hash',active:null,reports:[],priorRun:{stage:'blocked',task:0,round:0,reports:1},reviewProvenance:{version:1,kind:'retained-recovery',session:'session',repository:'/repo',candidateFingerprint:'hash',reviewCandidateFingerprint:'hash',reviewFiles:['a'],failedRun:{id:'review-failed',stage:'quality',task:0,round:0},routes:changedRoutes,timeouts:timeoutPolicy(),correctionPolicy:{maxFixRounds:4,source:'default'}},workspace:'/repo',owner:'session'};
+ const h=harness();h.entries.push(retained,{type:'custom',customType:'delivery-mode-v1',data:reviewState});await h.events.session_start({},h.ctx);
+ assert.equal(h.controller.state().retainedRun,undefined);assert.match(h.controller.state().reason,/binding|lineage|matching/i);
+});
+test('ambiguous legacy recovery review lineage fails closed without asking to clean retained work',async()=>{
+ const reviewPlan={title:'Legacy recovery',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ const reviewState={version:1,enabled:true,stage:'blocked',task:0,round:0,plan:reviewPlan,routes,timeouts:timeoutPolicy(),snapshot:'hash',active:null,reports:[],priorRun:{stage:'blocked',task:0,round:2,reports:1},reason:'legacy review stopped',workspace:'/repo',owner:'session'};
+ const h=harness();h.entries.push({type:'custom',customType:'delivery-mode-v1',data:reviewState});await h.events.session_start({},h.ctx);
+ assert.match(h.controller.state().reason,/no unique matching same-session, same-repository/i);assert.doesNotMatch(h.controller.state().reason,/clean (?:the )?(?:tree|workspace)|discard retained/i);assert.equal(h.controller.state().retainedRun,undefined);
+});
+test('standalone read-only review never acquires retained implementation authority',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('complete',routes));await h.events.session_start({},h.ctx);
+ await h.events.input({text:'Review a separate file',source:'interactive'},h.ctx);
+ const review={title:'Separate review',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['other.js'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ await h.tools.delivery_plan.execute('review',review,null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().plan.mode,'review');assert.equal(h.controller.state().stage,'complete');assert.equal(h.calls.filter(call=>call.params?.agent==='delivery-coder').length,0);
+ assert.deepEqual(h.controller.state().reviewProvenance,{version:1,kind:'standalone'});assert.equal(h.controller.state().retainedRun,undefined);
 });
 
 for(const stage of ['coder','spec','quality','security'])test(`connection failure retries only the failed ${stage} on the approved route`,async()=>{

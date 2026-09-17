@@ -198,16 +198,34 @@ export function createDeliveryBranch(root,name,expectedHead) {
 }
 function safePaths(paths) {
   if(!Array.isArray(paths)||!paths.length)throw new Error('Approved path set must not be empty');
-  for(const p of paths)if(typeof p!=='string'||!p||p.startsWith(':')||p.startsWith('/')||p.includes('\\0')||p.includes('\0')||p.split('/').includes('..')||p.split('/').includes('.git'))throw new Error('Invalid approved path');
+  for(const p of paths)if(typeof p!=='string'||!p||p.startsWith(':')||p.startsWith('/')||p.includes('\\')||p.includes('\0')||p.split('/').includes('..')||p.split('/').includes('.git'))throw new Error('Invalid approved path');
   return [...new Set(paths)].sort();
 }
 function literalPathspecs(paths) {
   return paths.map(path=>`:(literal)${path}`);
 }
+const scopeBase=path=>path.replace(/\/+$/,'');
+const inLiteralScope=(path,scope)=>path===scopeBase(scope) || path.startsWith(scopeBase(scope)+'/');
+function assertNoSymlinkAncestor(root,path) {
+  root=realpathSync(root);const parts=path.split('/');let current=root;
+  for(let i=0;i<parts.length-1;i++) {
+    current=join(current,parts[i]);
+    try {if(lstatSync(current).isSymbolicLink())throw new Error(`Approved path has a symlink ancestor: ${path}`);}
+    catch(error) {if(error.code==='ENOENT')return;throw error;}
+  }
+}
+function approvedInventory(root,scopes,{rejectOutside=false}={}) {
+  const expected=safePaths(scopes);for(const scope of expected)assertNoSymlinkAncestor(root,scopeBase(scope));
+  const changed=changedPaths(root);for(const path of changed)assertNoSymlinkAncestor(root,path);
+  const outside=changed.filter(path=>!expected.some(scope=>inLiteralScope(path,scope)));
+  if(rejectOutside && outside.length)throw new Error(`Changed paths outside the approved task scope: ${outside.join(', ')}.`);
+  return changed.filter(path=>expected.some(scope=>inLiteralScope(path,scope))).sort();
+}
 export function scopedContentFingerprint(root,paths) {
-  const expected=safePaths(paths);const h=createHash('sha256');
+  const inventory=approvedInventory(root,paths);const h=createHash('sha256');
   h.update(git(root,['rev-parse','HEAD']).trim());
-  for(const path of expected) {
+  h.update('\0'+git(root,['symbolic-ref','--quiet','--short','HEAD']).trim());
+  for(const path of inventory) {
     const absolute=resolve(root,path);h.update('\0'+path+'\0');
     let st;try {st=lstatSync(absolute);} catch(error) {if(error.code==='ENOENT'){h.update('deleted\0');continue;}throw error;}
     if(st.isSymbolicLink()) {h.update('symlink\0'+readlinkSync(absolute)+'\0');continue;}
@@ -233,28 +251,44 @@ export function commitPaths(root,commit) {
   return git(root,['diff-tree','--no-commit-id','--name-only','--no-renames','-r','-z','--root',commit]).split('\0').filter(Boolean).sort();
 }
 export function changedPaths(root) {
-  const raw=git(root,['status','--porcelain=v1','-z','--untracked-files=all']);
-  const result=[];for(const entry of raw.split('\0')) {if(!entry)continue;const value=entry.slice(3);result.push(value.startsWith('"')?JSON.parse(value):value);}
+  const fields=git(root,['status','--porcelain=v1','-z','--untracked-files=all']).split('\0');
+  const result=[];
+  for(let i=0;i<fields.length;i++) {
+    const entry=fields[i];if(!entry)continue;
+    const status=entry.slice(0,2),path=entry.slice(3);result.push(path);
+    if(status.includes('R') || status.includes('C')) {const source=fields[++i];if(source)result.push(source);}
+  }
   return [...new Set(result)].sort();
 }
 export function assertApprovedPaths(root,approved,{allowStaged=false}={}) {
-  const expected=safePaths(approved);
-  const staged=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  safePaths(approved);
+  const staged=git(root,['diff','--cached','--name-only','-z','--no-renames']).split('\0').filter(Boolean).sort();
   if(staged.length && !allowStaged)throw new Error('Pre-staged changes are not accepted; unstage them before delivery execution.');
-  const actual=changedPaths(root),outside=actual.filter(path=>!expected.includes(path));
-  if(outside.length)throw new Error(`Changed paths outside the approved task scope: ${outside.join(', ')}.`);
-  return actual;
+  return approvedInventory(root,approved,{rejectOutside:true});
 }
 export function clearApprovedStagedPaths(root,approved) {
   const expected=safePaths(approved);
-  const staged=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
-  const outside=staged.filter(path=>!expected.includes(path));
+  const staged=git(root,['diff','--cached','--name-only','-z','--no-renames']).split('\0').filter(Boolean).sort();
+  const outside=staged.filter(path=>!expected.some(scope=>inLiteralScope(path,scope)));
   if(outside.length)throw new Error(`Refusing to clear staged paths outside extension ownership: ${outside.join(', ')}.`);
+  for(const path of staged)assertNoSymlinkAncestor(root,path);
   if(staged.length)execFileSync('git',['-c','core.fsmonitor=false','-C',root,'restore','--staged','--',...literalPathspecs(staged)],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
   return staged;
 }
 export function branchCommitState(root,expectedHead) {
   const state=branchState(root);if(expectedHead && state.head!==expectedHead)throw new Error('Branch HEAD changed outside delivery orchestration.');return state;
+}
+function stagedPaths(root) {
+  return git(root,['diff','--cached','--name-only','-z','--no-renames']).split('\0').filter(Boolean).sort();
+}
+function commitOwnershipError(message) {const error=new Error(message);error.commitOwnershipInvalid=true;return error;}
+function assertPreparedAuthorization(root,state,authorization) {
+  const current=branchState(root);
+  if(current.branch!==state.branch || current.head!==state.head)throw commitOwnershipError('Delivery branch or HEAD changed after staged-content authorization; no commit was attempted.');
+  const invalidate=message=>{const error=new Error(message);error.commitAuthorizationInvalid=true;throw error;};
+  if(scopedContentFingerprint(root,authorization.paths)!==authorization.snapshot)invalidate('Approved content changed after staged-content authorization. Re-run checks and reviews.');
+  const staged=stagedPaths(root);
+  if(JSON.stringify(staged)!==JSON.stringify(authorization.paths) || stagedDiffHash(root)!==authorization.diffHash)invalidate('Approved staged content changed after staged-content authorization. Re-run checks and reviews.');
 }
 export function commitApprovedTask(root,{changeType,title,files,expectedHead,snapshot,scope=[],allowStaged=false,expectedAuthorization,onPrepared,onBeforeStage}) {
   const state=branchCommitState(root,expectedHead);
@@ -264,7 +298,7 @@ export function commitApprovedTask(root,{changeType,title,files,expectedHead,sna
     if(expectedAuthorization) {error.commitAuthorizationInvalid=true;error.message='Approved staged content changed after commit failure; commit resume authority was invalidated. Re-run checks and reviews.';}
     throw error;
   }
-  const existing=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  const existing=stagedPaths(root);
   if(existing.length && JSON.stringify(existing)!==JSON.stringify([...paths].sort())) {
     const error=new Error(expectedAuthorization?'Approved staged content changed after commit failure; commit resume authority was invalidated.':'Existing staged paths differ from the approved task scope.');
     if(expectedAuthorization)error.commitAuthorizationInvalid=true;throw error;
@@ -280,7 +314,7 @@ export function commitApprovedTask(root,{changeType,title,files,expectedHead,sna
   if(scopedContentFingerprint(root,paths)!==snapshot)rejectSnapshot();
   if(!existing.length)execFileSync('git',['-c','core.fsmonitor=false','-C',root,'add','--',...literalPathspecs(paths)],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
   if(scopedContentFingerprint(root,paths)!==snapshot)rejectSnapshot();
-  const staged=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  const staged=stagedPaths(root);
   if(JSON.stringify(staged)!==JSON.stringify([...paths].sort())) {
     const error=new Error(expectedAuthorization?'Approved staged content changed after commit failure; commit resume authority was invalidated.':'Staged paths differ from the reviewed accepted path set.');
     if(expectedAuthorization)error.commitAuthorizationInvalid=true;throw error;
@@ -295,12 +329,19 @@ export function commitApprovedTask(root,{changeType,title,files,expectedHead,sna
     }
   }
   onPrepared?.(structuredClone(authorization));
+  // The authorization callback and ordinary local concurrency are both race
+  // boundaries. Revalidate ownership, accepted content and exact staged bytes
+  // immediately before invoking Git.
+  assertPreparedAuthorization(root,state,authorization);
   try {execFileSync('git',['-c','core.fsmonitor=false','-C',root,'commit','-m',message],{encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe'],env:{...process.env,GIT_TERMINAL_PROMPT:'0'}});}
   catch(error) {
     const wrapped=new Error(`Git commit failed: ${error.message}`);wrapped.commitAuthorization=authorization;throw wrapped;
   }
   const next=branchState(root);
-  if(next.head===state.head)throw new Error('Delivery commit did not advance HEAD.');
+  if(next.branch!==state.branch) {const error=new Error('Delivery branch changed while committing; the resulting commit was not adopted.');error.commitCompleted=true;throw error;}
+  if(next.head===state.head) {const error=new Error('Delivery commit did not leave HEAD advanced; the resulting commit was not adopted.');error.commitCompleted=true;throw error;}
+  const lineage=gitText(root,['--no-replace-objects','rev-list','--parents','-n','1',next.head]).split(/\s+/);
+  if(lineage.length!==2 || lineage[0]!==next.head || lineage[1]!==state.head) {const error=new Error('Delivery commit parent does not match the authorized HEAD; the resulting commit was not adopted.');error.commitCompleted=true;throw error;}
   // A successful Git command is not enough: post-commit hooks may have
   // amended the commit. Compare the committed diff before recording lifecycle
   // authority, and never adopt a hash whose tree differs from what was staged.
