@@ -60,13 +60,7 @@ Setup is not a recovery step. After initial configuration, ask for a specific mo
 
 Describe the task normally, or start with `/delivery Add …`. You approve the scope, workspace and checks before anything runs.
 
-Each implementation task goes through:
-
-1. One coder.
-2. The task's checks.
-3. Independent spec and quality reviews.
-4. Independent read-only security review when required.
-5. Bounded fixes if necessary.
+Each new implementation task binds `reviewPolicy: balanced` by default (use `strict` for separate gates). Balanced runs one coder, focused checks, one fresh bounded optimizer, affected checks only when the optimizer changed source, then one combined spec+quality review; security runs only for explicitly sensitive tasks. Strict runs the optimizer and then separate spec, quality and security reviews. Approved tasks are committed before the next task; bounded corrections restart review without a second optimizer.
 
 Release checks run once, after **all** tasks.
 
@@ -91,7 +85,7 @@ If a run gets stuck, check `/delivery status` first. Reviewers are never given w
 
 Status identifies the next action, the models bound to the retained plan, models configured for future plans, native worker evidence and recorded host checks. A closed failed attempt needs a corrective proposal from retained requirements; it does not require a new session or another setup. Calling resume on a running, completed or already-closed run returns guidance without launching a duplicate worker.
 
-During an active owned delivery run, supervisor replies are accepted as informational evidence or clarifications without an extra confirmation prompt, including non-UI contexts. They cannot authorize scope, model or budget changes, waive reviews, or broaden tool permissions; those remain subject to the explicit delivery approval mechanisms.
+During an active owned delivery run, only the exact journaled child/request may receive an automatically admitted supervisor envelope (`kind: evidence|clarification`, bounded `content`, `nonAuthoritative: true`). Its content is untrusted evidence only: it cannot authorize scope, files, model, budget, deadline, tools, checks, reviews, commits, branches, pushes, merges or deployment. Malformed or unsafe replies are blocked.
 
 An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
 
@@ -111,7 +105,7 @@ The temporary version-1 correction setting is:
 
 - Trusted-session safeguards, **not an OS sandbox**. Workers run with your account permissions.
 - Do not run competing writers in the same workspace.
-- No automatic commits, pushes, merges or deployments. Git/issue automation is [planned](docs/roadmap.md).
+- New implementation deliveries require a clean worktree, bind a feature/bug/chore branch, and create review-gated logical task commits only after fresh spec, quality and security approvals. Review and retained legacy plans remain compatible and do not create branches or commits. Pushes, merges and deployments remain manual.
 - Native pi-subagents workers only; no external coding-CLI fallback.
 - Installation is not transactional. On conflicts, resolve and rerun.
 

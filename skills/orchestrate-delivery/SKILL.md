@@ -9,7 +9,7 @@ Use SPARK for research, debugging, design, TDD and verification. Use the install
 
 ## Prepare
 
-Read repository instructions and relevant project memory. Resolve genuine scope questions using the appropriate SPARK skills. Select the intended workspace before activating delivery; automatic Git branching/committing is not implemented.
+Read repository instructions and relevant project memory. Resolve genuine scope questions using the appropriate SPARK skills. Select the intended workspace before activating delivery. New implementation plans bind a feature/bug/chore Git lifecycle and `reviewPolicy` (balanced by default, strict opt-in): balanced tasks use coder → checks → one bounded optimizer → affected checks when changed → combined spec+quality → conditional sensitive-task security → commit; strict uses separate spec, quality and security. Proposal requires a clean worktree, approval creates only the bound branch, and reviewed task commits are orchestrated by the extension. Retained legacy and review plans remain read-only/compatible.
 
 If delivery tools are missing, request installation and a full Pi restart after workers settle. Do not pretend workers ran. `/delivery setup` selects exact routes and obtains provider-context consent. Never silently substitute models.
 
@@ -25,7 +25,7 @@ A clarification answer supplies requirements, not execution approval. Incorporat
 
 ## Propose and execute
 
-- For a new proposal, call `delivery_plan` with coherent tasks, acceptance criteria, file scope and executable checks. Put current-task checks in `tasks[].checks` and release gates in top-level `checks`.
+- For a new proposal, call `delivery_plan` with coherent tasks, acceptance criteria, file scope, executable checks, and `changeType: feature|bug|chore` for implementation Git lifecycle deliveries. Put current-task checks in `tasks[].checks` and release gates in top-level `checks`.
 - For an existing Markdown plan, use `delivery_execute` with `planFile`, read the returned source document and derive its tasks with `delivery_plan` using the same path. Preserve its boundaries and constraints.
 - A new proposal needs a fresh real user approval before `delivery_execute`. Questions, rejection and approval of an earlier proposal are not permission for the current candidate. The unchanged explicitly requested source-document flow retains its own bound authorization.
 - Let delivery own dispatch and progression. Do not call unmanaged subagent execution tools or grant write tools to reviewers.

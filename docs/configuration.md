@@ -33,7 +33,7 @@ The temporary version-1 correction setting is:
 
 `maxFixRounds` accepts integers `0..8`. The default is `4` for new plans; older retained plans remain at `2` until explicit migration. Phase 2 will move this setting into profiles while preserving this migration behavior.
 
-Git and remote issue-action configuration is not implemented yet. Do not add speculative keys expecting them to grant permissions.
+New implementation plans supply `changeType: feature|bug|chore` and bind `reviewPolicy: balanced|strict` (`balanced` is the default). Each task declares `sensitive: true|false`; balanced runs task security review only for sensitive tasks, while strict always runs it. The lifecycle is coder → focused checks → one fresh bounded optimizer → checks only if source changed → combined spec+quality (balanced) or separate spec/quality/security (strict) → exact-path logical commit. Corrections invalidate approvals and restart review without a second optimizer. Before proposal the tracked and untracked worktree must be clean. The extension selects the default branch without network access, binds a safe `<prefix>/<slug>` branch (or continues on an existing clean non-default branch), and creates it only after approval. Commits, branch identity, HEAD and snapshots are revalidated; failures remain resumable without replaying the coder. Review-only and retained legacy plans do not create branches or commits. Git and remote issue-action configuration is not user-configurable; do not add speculative keys expecting them to grant permissions.
 
 ## Model connection recovery
 

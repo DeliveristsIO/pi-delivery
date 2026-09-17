@@ -1,5 +1,6 @@
 export const ROLES = ['planning', 'coder', 'spec', 'quality', 'security'];
-export const AGENTS = { coder: 'delivery-coder', spec: 'delivery-reviewer', quality: 'delivery-reviewer', security: 'delivery-security' };
+export const AGENTS = { coder: 'delivery-coder', optimizer: 'delivery-coder', spec: 'delivery-reviewer', quality: 'delivery-reviewer', security: 'delivery-security' };
+export const REVIEW_POLICIES = ['balanced','strict'];
 export const ASTRA = 'openai-codex/gpt-6-astra';
 export const REPORT_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -11,6 +12,16 @@ export const REPORT_SCHEMA = {
 };
 const check = (ok, message) => { if (!ok) throw new Error(message); };
 const text = (v, max=16000) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+export const CHANGE_TYPES = ['feature','bug','chore'];
+export function validateSupervisorReply(value) {
+  check(value && typeof value==='object' && !Array.isArray(value),'Supervisor reply must be an envelope');
+  const keys=Object.keys(value).sort();
+  check(JSON.stringify(keys)===JSON.stringify(['content','kind','nonAuthoritative']),'Supervisor reply envelope contains unknown or missing keys');
+  check(value.nonAuthoritative===true,'Supervisor reply must be explicitly non-authoritative');
+  check(value.kind==='evidence' || value.kind==='clarification','Supervisor reply kind is not allowlisted');
+  check(text(value.content,16000) && !value.content.includes('\0'),'Supervisor reply content is empty or oversized');
+  return {kind:value.kind,content:value.content,nonAuthoritative:true};
+}
 export function catalog(all, available) {
   const ids = new Set(available.map(m => `${m.provider}/${m.id}`));
   return [...new Set(all.map(m=>`${m.provider}/${m.id}`))].sort().map(id=>({id,available:ids.has(id),evidence:'not tested'}));
@@ -23,10 +34,13 @@ export function validatePlan(input) {
   check(input && typeof input==='object' && JSON.stringify(input).length<=64000, 'Invalid or oversized plan');
   check(text(input.title,200), 'Invalid plan title');
   check(input.mode===undefined || ['implementation','review'].includes(input.mode), 'Invalid plan mode');
+  if(input.changeType!==undefined)check(input.mode!=='review' && CHANGE_TYPES.includes(input.changeType),'changeType must be feature, bug, or chore and is only valid for implementation plans');
+  if(input.reviewPolicy!==undefined)check(input.mode!=='review' && REVIEW_POLICIES.includes(input.reviewPolicy),'reviewPolicy must be balanced or strict and is only valid for implementation plans');
   if(input.commits!==undefined)check(input.mode==='review' && Number.isInteger(input.commits) && input.commits>=1 && input.commits<=20,'commits requires review mode and 1–20 commits');
   check(Array.isArray(input.tasks) && input.tasks.length>0 && input.tasks.length<=12, 'Plan needs 1–12 tasks');
   for (const t of input.tasks) {
     check(text(t.title,200) && text(t.instructions), 'Invalid task instructions');
+    if(t.sensitive!==undefined)check(typeof t.sensitive==='boolean','Task sensitivity must be a boolean');
     check(Array.isArray(t.files) && t.files.length>0 && t.files.length<=100 && t.files.every(f=>text(f,512) && !f.startsWith('/') && !f.startsWith(':') && !f.includes('\\') && !f.split('/').includes('..') && !f.split('/').includes('.git')), 'Invalid task files');
     if(t.checks!==undefined)check(validChecks(t.checks,input.mode!=='review'),'Task checks must be executable commands (nonempty for implementation)');
     check(Array.isArray(t.acceptance) && t.acceptance.length>0 && t.acceptance.length<=30 && t.acceptance.every(a=>text(a,2000)), 'Task needs acceptance criteria');
@@ -110,11 +124,26 @@ export function fixRoundLimit(state) {
   return correctionPolicy({maxFixRounds:policy.maxFixRounds}).maxFixRounds;
 }
 export function initialState() {
-  return {version:1,enabled:false,stage:'planning',task:0,round:0,plan:null,routes:null,snapshot:null,active:null,reports:[],feedback:'',reason:''};
+  return {version:1,enabled:false,stage:'planning',task:0,round:0,plan:null,routes:null,snapshot:null,active:null,reports:[],feedback:'',reason:'',gitPolicy:null,optimizerPasses:{},optimizerBypass:false,reviewedContentSnapshot:null,reviewContentCandidate:null};
+}
+function lifecycleReviewPolicy(state) { return state?.gitPolicy?.reviewPolicy || null; }
+function taskNeedsSecurity(state) {
+  const policy=lifecycleReviewPolicy(state);
+  if(!policy) return Boolean(state.plan?.security || state.gitPolicy);
+  return policy==='strict' || state.plan?.tasks?.[state.task]?.sensitive===true;
+}
+function reviewEntry(state) { return lifecycleReviewPolicy(state)==='strict' ? 'spec' : 'quality'; }
+function afterTaskReview(state) {
+  if(state.gitPolicy)return 'commit';
+  if(state.task+1<state.plan.tasks.length)return state.plan.mode==='review'?'spec':'coder';
+  return 'verification';
 }
 export function approve(state, routes, snapshot) {
   check(state.stage==='awaiting-approval' && state.plan, 'No proposed plan awaiting approval');
-  return {...initialState(),enabled:true,plan:validatePlan(state.plan),routes:structuredClone(routes),stage:state.plan.mode==='review'?'review-checks':'coder',snapshot};
+  const plan=validatePlan(state.plan);
+  // A plan without a retained lifecycle policy is legacy state and must not
+  // acquire branch/commit behavior merely because its plan data has a type.
+  return {...initialState(),enabled:true,plan,routes:structuredClone(routes),stage:plan.mode==='review'?'review-checks':'coder',snapshot,gitPolicy:state.gitPolicy ? structuredClone(state.gitPolicy) : null};
 }
 export function advance(state, report, snapshot) {
   const s=structuredClone(state);
@@ -123,14 +152,37 @@ export function advance(state, report, snapshot) {
     check(snapshot===s.snapshot,'Workspace changed during verification');
     s.stage='complete'; return s;
   }
-  check(AGENTS[s.stage] || s.stage==='checks', 'Invalid execution stage');
-  if(s.stage!=='coder') check(snapshot===s.snapshot,'Workspace changed during review; reapproval required');
+  check(AGENTS[s.stage] || ['checks','optimizer-checks','final-checks','commit','aggregate-quality','aggregate-security'].includes(s.stage), 'Invalid execution stage');
+  if(s.stage!=='coder' && s.stage!=='optimizer' && s.stage!=='commit' && s.stage!=='final-checks') check(snapshot===s.snapshot,'Workspace changed during review; reapproval required');
+  if(s.stage==='commit') {
+    check(report?.committed===true,'Commit stage requires extension-owned commit evidence');
+    check(snapshot===s.snapshot,'Workspace changed before commit');
+    s.reports.push({stage:s.stage,task:s.task,round:s.round,report,snapshot});s.active=null;s.optimizerBypass=false;s.reviewedContentSnapshot=null;s.reviewContentCandidate=null;
+    if(s.aggregateCorrection) {s.aggregateCorrection=false;s.stage='verification';}
+    else if(s.task+1 < s.plan.tasks.length) {s.task++;s.round=0;s.feedback='';s.stage='coder';}
+    else s.stage='final-checks';
+    return s;
+  }
   check(report && ['approved','changes_requested','blocked'].includes(report.status) && text(report.summary,8000) && Array.isArray(report.findings) && report.findings.length<=50 && report.findings.every(f=>text(f,2000)) && !(report.status==='approved' && report.findings.length), 'Missing or inconsistent structured report');
   s.reports.push({stage:s.stage,task:s.task,round:s.round,report,snapshot});
+  if(report.status==='changes_requested') s.reviewContentCandidate=null;
+  if(report.reviewedContentSnapshot && ['quality','security','aggregate-quality','aggregate-security'].includes(s.stage)) s.reviewedContentSnapshot={task:s.task,aggregate:s.stage.startsWith('aggregate-'),snapshot:report.reviewedContentSnapshot};
+  // An optimizer reservation is consumed even when its structured report is
+  // not approved. This prevents correction handling from silently launching a
+  // second optimizer pass for the same task.
+  if(s.stage==='optimizer' && !s.optimizerPasses?.[s.task]?.ran) {
+    s.optimizerPasses[s.task]={ran:true,changed:report.optimizerChanged===true,beforeSnapshot:report.optimizerBeforeSnapshot,afterSnapshot:report.optimizerAfterSnapshot,checks:report.optimizerChanged===true?'rerun':'reused',status:report.status};
+    s.optimizerBypass=true;
+  }
   s.active=null; s.snapshot=snapshot;
   if(report.status==='blocked') return {...s,stage:'blocked',reason:report.summary};
   if(report.status==='changes_requested') {
     if(s.plan.mode==='review')return {...s,stage:'blocked',reason:'Read-only validation found issues; fixes require a separate approved implementation plan.'};
+    if(s.gitPolicy && (s.stage==='aggregate-quality' || s.stage==='aggregate-security')) {
+      if(s.round>=fixRoundLimit(s))return {...s,stage:'blocked',reason:`Fix/review round limit exhausted (${fixRoundLimit(s)})`};
+      s.aggregateCorrection=true;s.stage='coder';s.round+=1;s.feedback=JSON.stringify(report);return s;
+    }
+    if(s.optimizerPasses?.[s.task]?.ran) s.optimizerBypass=true;
     if(s.round>=fixRoundLimit(s)) {
       const limit=fixRoundLimit(s);
       return {...s,stage:'blocked',reason:`Fix/review round limit exhausted (${limit})`};
@@ -138,10 +190,26 @@ export function advance(state, report, snapshot) {
     return {...s,stage:'coder',round:s.round+1,feedback:JSON.stringify(report)};
   }
   if(s.stage==='coder') s.stage='checks';
+  else if(s.stage==='checks' && s.aggregateCorrection) s.stage='final-checks';
+  else if(s.stage==='checks' && s.optimizerBypass) s.stage=reviewEntry(s);
+  else if(s.stage==='checks' && lifecycleReviewPolicy(s)) s.stage='optimizer';
   else if(s.stage==='checks') s.stage='spec';
-  else if(s.stage==='spec') s.stage='quality';
-  else if(s.stage==='quality' && s.plan.security) s.stage='security';
-  else if(s.task+1 < s.plan.tasks.length) { s.task++; s.stage=s.plan.mode==='review'?'spec':'coder'; s.round=0; s.feedback=''; }
+  else if(s.stage==='optimizer') {
+    s.optimizerPasses[s.task]={ran:true,changed:report.optimizerChanged===true, beforeSnapshot:report.optimizerBeforeSnapshot, afterSnapshot:report.optimizerAfterSnapshot, checks:report.optimizerChanged===true?'rerun':'reused'};
+    s.stage=report.optimizerChanged===true?'optimizer-checks':reviewEntry(s);
+  }
+  else if(s.stage==='optimizer-checks') s.stage=reviewEntry(s);
+  else if(s.stage==='spec') s.stage=lifecycleReviewPolicy(s)==='balanced'?'quality':'quality';
+  else if(s.stage==='quality' && taskNeedsSecurity(s)) s.stage='security';
+  else if(s.stage==='quality' && s.gitPolicy) s.stage='commit';
+  else if(s.stage==='quality' && s.task+1 < s.plan.tasks.length) { s.task++; s.stage=s.plan.mode==='review'?'spec':'coder'; s.round=0; s.feedback=''; s.optimizerBypass=false; }
+  else if(s.stage==='security' && s.gitPolicy) s.stage='commit';
+  else if(s.stage==='security' && s.task+1 < s.plan.tasks.length) { s.task++; s.stage=s.plan.mode==='review'?'spec':'coder'; s.round=0; s.feedback=''; s.optimizerBypass=false; }
+  else if(s.stage==='security') s.stage='verification';
+  else if(s.stage==='final-checks') s.stage=s.gitPolicy?'aggregate-quality':'verification';
+  else if(s.stage==='aggregate-quality') s.stage='aggregate-security';
+  else if(s.stage==='aggregate-security') s.stage=s.aggregateCorrection?'commit':'verification';
+  else if(s.stage==='quality' && s.task+1 >= s.plan.tasks.length) s.stage='verification';
   else s.stage='verification';
   return s;
 }

@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import {registerDelivery} from '../extensions/delivery/extension.mjs';
 import {timeoutPolicy} from '../extensions/delivery/policy.mjs';
 const routes={planning:'openai-codex/gpt-6-astra',coder:'custom/c',spec:'custom/r',quality:'custom/r',security:'custom/s'};
-const plan={title:'Fixture',tasks:[{title:'Add',instructions:'Add one',files:['a'],checks:['node --test'],acceptance:['works']}],checks:['node --test'],risk:'low',security:true};
+const plan={title:'Fixture',changeType:'feature',tasks:[{title:'Add',instructions:'Add one',files:['a'],checks:['node --test'],acceptance:['works']}],checks:['node --test'],risk:'low',security:true};
 function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const configuredWorkingTreeEvidence=config.workingTreeEvidence;config={...config};delete config.workingTreeEvidence;
  const events={},commands={},tools={},entries=[],statuses=[],messages=[],calls=[];
@@ -14,7 +14,8 @@ function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const models=[...new Set(Object.values(routes))].map(s=>{const [provider,...id]=s.split('/');return {provider,id:id.join('/')};});
  const ctx={cwd:'/repo',hasUI:true,mode:'tui',isIdle:()=>true,isProjectTrusted:()=>true,modelRegistry:{getAll:()=>models,getAvailable:()=>models},get model(){return model;},sessionManager:{getSessionId:()=> 'session',getBranch:()=>entries},ui:{setStatus:(k,v)=>statuses.push(v),notify:()=>{},confirm:async()=>true,select:async(t,opts)=>opts[0],input:async()=> 'trial'}};
  const pi={on:(e,h)=>events[e]=h,registerCommand:(n,c)=>commands[n]=c,registerTool:t=>tools[t.name]=t,appendEntry:(customType,data)=>entries.push({type:'custom',customType,data:structuredClone(data)}),setModel:async m=>{model=m;return true;},sendMessage:m=>messages.push(m),sendUserMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','edit','write','delivery_plan'],setActiveTools:()=>{},events:{}};
- const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,orphanedRunEvidence:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false};
+ const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',scopedContentFingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,orphanedRunEvidence:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false,
+   lifecyclePreflight:()=>({branch:'main',defaultBranch:'main',head:'hash',clean:true,status:''}),firstFreeBranch:()=> 'feature/fixture',createDeliveryBranch:()=>({branch:'feature/fixture',defaultBranch:'main',head:'hash',clean:true,status:''}),branchState:()=>({branch:'feature/fixture',head:'hash',defaultBranch:'main',clean:true,status:''}),commitApprovedTask:()=>({hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:'hash'}),assertApprovedPaths:()=>[],clearApprovedStagedPaths:()=>[]};
  if(configuredWorkingTreeEvidence)deps.workingTreeEvidence=configuredWorkingTreeEvidence;
  const controller=registerDelivery(pi,{plan:{},empty:{}},deps);
  return {pi,ctx,events,commands,tools,entries,statuses,messages,calls,controller,deps,config};
@@ -182,8 +183,8 @@ for(const choice of ['accept','new-policy','decline','workspace','config','shutd
  assert.equal(after.stage,'complete');assert.deepEqual(after.coding,before.coding);assert.equal(after.round,before.round);
  if(choice==='new-policy'){assert.equal(after.routes.security,routes.spec);assert.equal(after.timeouts.reviewMs,20*60000);}
  assert.deepEqual(after.reports.slice(0,before.reports.length),before.reports);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-security').length,2);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-security').length,3);
 });
 test('security preflight evidence survives two restarts without coder replay',async()=>{
  const {h}=await rejectedSecurity();const original=h.controller.state();
@@ -196,7 +197,7 @@ test('security preflight evidence survives two restarts without coder replay',as
  await current.tools.delivery_resume.execute('r',{},null,null,current.ctx);await current.controller.settled();
  assert.equal(current.controller.state().stage,'complete');assert.deepEqual(current.controller.state().coding,original.coding);
  assert.deepEqual(current.controller.state().reports.slice(0,original.reports.length),original.reports);
- assert.deepEqual(current.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security']);
+ assert.deepEqual(current.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security','delivery-reviewer','delivery-security']);
 });
 for(const evidence of ['matching','missing','other-reservation','other-snapshot','newer-unknown-error'])test(`legacy overwritten preflight reason: ${evidence}`,async()=>{
  const {h}=await rejectedSecurity();const entries=structuredClone(h.entries);
@@ -214,7 +215,7 @@ for(const evidence of ['matching','missing','other-reservation','other-snapshot'
  }
  assert.equal(next.controller.state().active.preflightRejection,securityPreflightError);
  await next.tools.delivery_resume.execute('r',{},null,null,next.ctx);await next.controller.settled();
- assert.equal(next.controller.state().stage,'complete');assert.deepEqual(next.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security']);
+ assert.equal(next.controller.state().stage,'complete');assert.deepEqual(next.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security','delivery-reviewer','delivery-security']);
 });
 test('final correction exhaustion stops without proposing another plan',async()=>{
  const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
@@ -297,8 +298,8 @@ test('later-task and final checks never run after the first coder',async()=>{
  await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('plan',p,null,null,h.ctx);
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');
- assert.deepEqual(executed,[['node first-test.mjs','checks'],['node later-test.mjs','checks'],['node release-test.mjs','verification']]);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
+ assert.deepEqual(executed,[['node first-test.mjs','checks'],['node later-test.mjs','checks'],['node release-test.mjs','final-checks']]);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,4);
 });
 for(const approval of ['accepted','declined','workspace changed','state changed','routes changed','budget changed'])test(`legacy check-scope recovery preserves work (${approval})`,async()=>{
  const h=harness();h.config.routes={...routes,security:routes.spec};h.config.timeouts={reviewMs:20*60000};const legacyTask={title:'Add',instructions:'Add one',files:['a'],acceptance:['works']};const oldPlan={...plan,tasks:[legacyTask,{...legacyTask,title:'Later'}],checks:['node release-test.mjs']};
@@ -325,14 +326,14 @@ test('interrupted task verification resumes checks and reviewers without replayi
  assert.equal(h.controller.state().stage,'checks');
  const next=harness();next.entries.push(h.entries.at(-1));await next.events.session_start({},next.ctx);
  await next.tools.delivery_resume.execute('resume',{},null,null,next.ctx);await next.controller.settled();
- assert.equal(next.controller.state().stage,'complete');assert.equal(next.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,0);
+ assert.equal(next.controller.state().stage,'complete');assert.equal(next.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);assert.equal(next.controller.state().reports.filter(r=>r.stage==='coder').length,1);
 });
 test('final release failure still blocks after all tasks, without replaying coders',async()=>{
  const h=harness();const p={...plan,tasks:[{...plan.tasks[0],checks:['node task-test.mjs']},{...plan.tasks[0],checks:['node later-test.mjs']}],checks:['node release-test.mjs']};
  h.deps.verifyCommand=async(_r,command)=>({command,code:command.includes('release')?1:0,output:'failed release'});
  await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('plan',p,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
- assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/Verification failed/);assert.equal(h.controller.state().task,1);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
+ assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/Final release check failed|Verification failed/);assert.equal(h.controller.state().task,1);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,4);
 });
 test('real command, auto activation, Astra selection and shell gate',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
@@ -345,15 +346,57 @@ test('missing routes visibly block implementation, not inherited GPT',async()=>{
  await assert.rejects(h.tools.delivery_plan.execute('id',plan,null,null,h.ctx),/route/);
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
+test('fresh implementation controller proposals require changeType',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ await assert.rejects(h.tools.delivery_plan.execute('id',{...plan,changeType:undefined},null,null,h.ctx),/changeType/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('fresh implementation binds balanced policy and explicit task sensitivity by default',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ await h.tools.delivery_plan.execute('id',{...plan,security:false,tasks:[{...plan.tasks[0],sensitive:true}]},null,null,h.ctx);
+ const state=h.controller.state();assert.equal(state.plan.reviewPolicy,'balanced');assert.equal(state.plan.tasks[0].sensitive,true);assert.equal(state.gitPolicy.reviewPolicy,'balanced');
+ assert.match(h.messages[0].content,/Review policy: balanced/);assert.match(h.messages[0].content,/Sensitive: yes/);
+});
+test('delivery status exposes the bound balanced and strict review policies',async()=>{
+ for(const reviewPolicy of ['balanced','strict']) {
+  const h=harness();await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('id',{...plan,reviewPolicy},null,null,h.ctx);
+  const status=await h.tools.delivery_status.execute();assert.equal(status.details.reviewPolicy,reviewPolicy);assert.match(status.content[0].text,new RegExp(`reviewPolicy ${reviewPolicy}`));
+ }
+});
+test('balanced optimizer source changes rerun task checks exactly once before combined review',async()=>{
+ const h=harness();let optimized=false;const checked=[];
+ h.deps.fingerprint=()=>optimized?'after':'hash';
+ h.deps.readOutcome=a=>{if(a.stage==='optimizer')optimized=true;return {status:'approved',summary:'ok',findings:[]};};
+ h.deps.verifyCommand=async(_root,command)=>{checked.push([command,h.controller.state().stage]);return {command,code:0,output:'PASS'};};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('id',{...plan,security:false},null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.ok(h.controller.state().reports.some(r=>r.stage==='optimizer-checks'));assert.deepEqual(checked,[['node --test','checks'],['node --test','optimizer-checks'],['node --test','final-checks']]);
+});
+test('approved task content race before commit is rejected and re-reviewed without adoption',async()=>{
+ const h=harness();let mutated=false,commitAttempts=0,adopted=0;
+ h.deps.scopedContentFingerprint=()=>mutated?'raced-content':'accepted-content';
+ h.deps.beforeCommit=()=>{if(!mutated)mutated=true;};
+ h.deps.commitApprovedTask=(_root,options)=>{
+  commitAttempts++;
+  if(h.deps.scopedContentFingerprint()!==options.snapshot){const error=new Error('Reviewed task snapshot changed before delivery staging; commit authorization was invalidated.');error.commitAuthorizationInvalid=true;throw error;}
+  adopted++;return {hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:options.snapshot};
+ };
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('id',{...plan,security:false},null,null,h.ctx);
+ await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const qualityReports=h.controller.state().reports.filter(r=>r.stage==='quality');
+ assert.equal(h.controller.state().stage,'complete');assert.equal(qualityReports.length,2);
+ assert.equal(commitAttempts,2);assert.equal(adopted,1);assert.equal(h.controller.state().gitPolicy.commits.length,1);
+ assert.equal(qualityReports[0].report.reviewedContentSnapshot,'accepted-content');assert.equal(qualityReports[1].report.reviewedContentSnapshot,'raced-content');
+});
 test('proposal alone cannot launch; approval runs all stages and verification',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
  await h.tools.delivery_plan.execute('id',plan,null,null,h.ctx);
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
  await h.commands.delivery.handler('approve',h.ctx);
  await h.controller.settled();
- assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-coder','delivery-reviewer','delivery-reviewer','delivery-security']);
- assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.model),[routes.coder,routes.spec,routes.quality,routes.security]);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-coder','delivery-coder','delivery-reviewer','delivery-security','delivery-reviewer','delivery-security']);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.model),[routes.coder,routes.coder,routes.quality,routes.security,routes.quality,routes.security]);
  assert.equal(h.controller.state().stage,'complete');
+ assert.equal(h.controller.state().gitPolicy.commits.length,1);assert.match((await h.tools.delivery_status.execute()).content[0].text,/Git lifecycle:.*base HEAD|Git commit:/);
  for(const c of h.calls.filter(c=>c.method==='spawn')) {assert.equal(c.params.context,'fresh');assert.equal(c.params.async,true);}
  await h.events.session_shutdown({},h.ctx);
 });
@@ -371,6 +414,13 @@ test('CLI/no-UI cannot auto approve plan',async()=>{
 test('unconfigured repo remains OFF; child registers nothing',async()=>{
  const h=harness({version:1,routes,evidence:{},repos:[]});await h.events.session_start({},h.ctx);assert.equal(h.controller.state().enabled,false);assert.match(h.statuses.at(-1),/OFF/);
  const result=registerDelivery({on:()=>assert.fail('child hook'),registerCommand:()=>assert.fail('child command')},{},{child:true});assert.equal(result,undefined);
+});
+test('legacy commit resume without a review fingerprint returns through review before committing',async()=>{
+ const h=harness();let commitAttempts=0;
+ h.entries.push({type:'custom',customType:'delivery-mode-v1',data:{version:1,enabled:true,stage:'commit',task:0,round:0,plan,routes,snapshot:'hash',active:null,reports:[],reason:'',workspace:'/repo',owner:'session',gitPolicy:{changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/fixture',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]}}});
+ h.deps.commitApprovedTask=()=>{commitAttempts++;assert.ok(h.controller.state().reports.some(r=>r.stage==='quality'));return {hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:'hash'};};
+ await h.events.session_start({},h.ctx);await h.commands.delivery.handler('resume',h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.equal(commitAttempts,1);assert.equal(h.controller.state().reports.filter(r=>r.stage==='quality').length,1);
 });
 test('reload during verification resumes checks without relaunching a coder',async()=>{
  const h=harness();
@@ -432,12 +482,12 @@ test('planner interprets raw request and starts only reviewers for the pinned ra
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('validate last 2 commits',h.ctx);
  assert.equal(h.messages.at(-1),'validate last 2 commits');
  assert.match((await h.tools.delivery_diff.execute('diff',{commits:2})).content[0].text,/committed diff/);
- await h.tools.delivery_plan.execute('id',{...plan,mode:'review',commits:2,tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
+ await h.tools.delivery_plan.execute('id',{...plan,mode:'review',changeType:undefined,commits:2,tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
  assert.equal(h.controller.state().plan.mode,'review');assert.deepEqual(h.controller.state().plan.reviewRange,range);
  await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');assert.ok(checked>0);
  assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-reviewer','delivery-reviewer','delivery-security']);
- assert.ok(h.calls.filter(c=>c.method==='spawn').every(c=>c.params.task.includes('Host verification evidence: [{') && c.params.task.includes('committed diff')));
+ assert.ok(h.calls.filter(c=>c.method==='spawn').every(c=>c.params.task.includes('Concise check evidence') && c.params.task.includes('command/code/signal/terminated') && c.params.task.includes('committed diff')));
 });
 test('committed multi-task spec evidence is path-scoped while aggregate reviewers inspect the range',async()=>{
  const h=harness();const range={base:'a'.repeat(40),head:'b'.repeat(40)},diffCalls=[];
@@ -447,7 +497,7 @@ test('committed multi-task spec evidence is path-scoped while aggregate reviewer
   return 'COMMITTED RANGE\n'+('large committed evidence '.repeat(2200))+'\n[Embedded diff truncated; inspect remaining approved files with repository-local git/read tools.]';
  };
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('validate last 2 commits',h.ctx);
- const committedPlan={...plan,mode:'review',commits:2,security:false,tasks:[
+ const committedPlan={...plan,mode:'review',changeType:undefined,commits:2,security:false,tasks:[
   {...plan.tasks[0],files:['app/a.rb'],checks:undefined},
   {...plan.tasks[0],title:'Second',files:['app/b.rb'],checks:undefined}
  ]};
@@ -465,7 +515,7 @@ test('committed multi-task spec evidence is path-scoped while aggregate reviewer
 test('read-only check failure stops without dispatching an automatic fix',async()=>{
  const h=harness();h.deps.verifyCommand=async()=>({code:1,output:'failing test'});
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('review',h.ctx);
- await h.tools.delivery_plan.execute('id',{...plan,mode:'review',tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
+ await h.tools.delivery_plan.execute('id',{...plan,mode:'review',changeType:undefined,tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
  await h.controller.settled();
  assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/failing test/);
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
@@ -473,7 +523,7 @@ test('read-only check failure stops without dispatching an automatic fix',async(
 test('ordinary user review request executes without an approval command',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
  await h.events.input({text:'Please validate these changes without fixing anything',source:'interactive'},h.ctx);
- await h.tools.delivery_plan.execute('id',{...plan,mode:'review',tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);await h.controller.settled();
+ await h.tools.delivery_plan.execute('id',{...plan,mode:'review',changeType:undefined,tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');
  assert.ok(h.calls.some(c=>c.method==='spawn'));assert.ok(h.calls.every(c=>c.params?.agent!=='delivery-coder'));
 });
@@ -534,14 +584,14 @@ test('implementation and review checks keep their ordering and stop on failure',
   const h=harness(),ran=[];
   h.deps.verifyCommand=async(_cwd,command)=>{ran.push(command);return {command,code:0,output:'PASS'};};
   await h.events.session_start({},h.ctx);
-  await h.tools.delivery_plan.execute('plan',{...plan,mode,checks:['first','second'],tasks:[{...plan.tasks[0],checks:mode==='review'?undefined:['first','second']}]},null,null,h.ctx);
+  await h.tools.delivery_plan.execute('plan',{...plan,mode,changeType:mode==='review'?undefined:plan.changeType,checks:['first','second'],tasks:[{...plan.tasks[0],checks:mode==='review'?undefined:['first','second']}]},null,null,h.ctx);
   await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
-  assert.deepEqual(ran,['first','second','first','second']);assert.equal(h.controller.state().stage,'complete');
+  assert.deepEqual(ran,mode==='implementation'?['first','second','first','second']:['first','second','first','second']);assert.equal(h.controller.state().stage,'complete');
  }
  const h=harness(),ran=[];
  h.deps.verifyCommand=async(_cwd,command)=>{ran.push(command);return {command,code:1,output:'FAIL'};};
  await h.events.session_start({},h.ctx);
- await h.tools.delivery_plan.execute('plan',{...plan,mode:'review',checks:['first','second'],tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
+ await h.tools.delivery_plan.execute('plan',{...plan,mode:'review',changeType:undefined,checks:['first','second'],tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  assert.deepEqual(ran,['first']);assert.equal(h.controller.state().stage,'blocked');
 });
@@ -564,7 +614,7 @@ test('confirmed coder timeout continues once on the exact model after runner clo
  await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('plan',plan,null,null,h.ctx);
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  const coders=h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder');
- assert.equal(coders.length,2);assert.equal(coders[0].params.timeoutMs,45*60000);assert.equal(coders[1].params.timeoutMs,15*60000);
+ assert.equal(coders.length,3);assert.equal(coders[0].params.timeoutMs,45*60000);assert.equal(coders[1].params.timeoutMs,15*60000);
  assert.ok(coders.every(c=>c.params.model===routes.coder));assert.match(coders[1].params.task,/partial.*verification|verify.*partial/i);
  assert.equal(h.controller.state().stage,'complete');assert.ok(proofChecks>=2);
 });
@@ -689,13 +739,13 @@ test('reloaded legacy approval without correction policy keeps the two-round lim
  assert.ok(h.calls.some(c=>c.method==='spawn'&&c.params.agent==='delivery-coder'));
 });
 const supervisorRequestEntry=(runId='owned',agent='delivery-coder',childIndex=0,id='request-1')=>({type:'custom_message',customType:'subagent_supervisor_request',details:{id,requestId:id,runId,agent,childIndex}});
-for (const hasUI of [true, false]) test(`active supervisor replies are informational without a confirmation prompt (${hasUI ? 'UI' : 'no UI'})`,async()=>{
+for (const hasUI of [true, false]) test(`plain supervisor replies require confirmation or are blocked (${hasUI ? 'UI' : 'no UI'})`,async()=>{
  const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder,agent:'delivery-coder',childIndex:0}}),supervisorRequestEntry());
  h.ctx.hasUI=hasUI;
- h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ h.ctx.ui.confirm=async()=>hasUI;
  await h.events.session_start({},h.ctx);
  const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'request-1',message:'clarification'}},h.ctx);
- assert.equal(response,undefined);
+ if(hasUI)assert.equal(response,undefined);else {assert.equal(response.block,true);assert.match(response.reason,/envelope/);}
 });
 
 test('active worker does not authorize a same-session supervisor reply for another child',async()=>{
@@ -705,14 +755,22 @@ test('active worker does not authorize a same-session supervisor reply for anoth
  assert.equal(response.block,true);assert.match(response.reason,/owned worker/);
 });
 
-test('legacy active owned worker state restores trusted supervisor reply identity',async()=>{
+test('strict supervisor envelope restores owned worker identity',async()=>{
  const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder}}),supervisorRequestEntry());
  await h.events.session_start({},h.ctx);
- h.ctx.hasUI=false;h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
- const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'request-1',message:'clarification'}},h.ctx);
+ h.ctx.hasUI=false;
+ const response=await h.events.tool_call({toolName:'subagent_supervisor',input:{action:'reply',replyTo:'request-1',message:JSON.stringify({kind:'clarification',content:'clarification',nonAuthoritative:true})}},h.ctx);
  assert.equal(response,undefined);
  assert.equal(h.controller.state().active.agent,'delivery-coder');
  assert.equal(h.controller.state().active.childIndex,0);
+});
+test('mixed supervisor payload fields are rejected even for an owned child',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('coder',routes,{active:{id:'owned',dir:'/fake',stage:'coder',model:routes.coder,agent:'delivery-coder',childIndex:0}}),supervisorRequestEntry());
+ await h.events.session_start({},h.ctx);h.ctx.hasUI=true;h.ctx.ui.confirm=async()=>{throw new Error('must not confirm mixed payload');};
+ const message=JSON.stringify({kind:'evidence',content:'safe',nonAuthoritative:true});
+ for(const input of [{action:'reply',replyTo:'request-1',message,envelope:{}},{action:'reply',replyTo:'request-1',message,reply:{}},{action:'reply',replyTo:'request-1',message,unknown:true}]) {
+  const response=await h.events.tool_call({toolName:'subagent_supervisor',input},h.ctx);assert.equal(response.block,true);
+ }
 });
 test('supervisor replies without an active owned worker remain blocked',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
@@ -776,8 +834,8 @@ test('fresh approval executes the replacement proposal on current routes; old ro
  await h.events.input({text:'Yes, implement the plan',source:'interactive'},h.ctx);
  await h.tools.delivery_execute.execute('go',{},null,null,h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');
- assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.model),[routes.coder,routes.spec,routes.quality,routes.security]);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.model),[routes.coder,routes.coder,routes.quality,routes.security,routes.quality,routes.security]);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
 });
 test('an old reply cannot authorize the replacement proposal',async()=>{
  const h=harness();h.entries.push(oldRunEntry('complete',{...routes,coder:routes.spec,security:routes.spec}));
@@ -832,19 +890,19 @@ test('prior run evidence stays in session history and out of the new active repo
 });
 
 for(const stage of ['coder','spec','quality','security'])test(`connection failure retries only the failed ${stage} on the approved route`,async()=>{
- const h=harness();let failed=false;
+ const h=harness();let failed=false;const strictPlan={...plan,reviewPolicy:'strict'};
  h.deps.isSettled=()=>true;
  h.deps.runProgress=a=>{
   if(a.stage!==stage || failed)return null;
   failed=true;
   return {state:'failed',nativeState:'partial',error:'Connection error.\nRequired structured output was not produced',model:a.model,attemptedModels:[a.model],durationMs:1000,sessionFiles:['/fake/prior.jsonl']};
  };
- await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',strictPlan,null,null,h.ctx);
  await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  const state=h.controller.state(),spawns=h.calls.filter(c=>c.method==='spawn');
  assert.equal(state.stage,'complete');assert.equal(state.round,0);
  const attempts=spawns.filter(c=>c.params.model===routes[stage] && c.params.agent===`delivery-${stage==='coder'?'coder':stage==='security'?'security':'reviewer'}`);
- assert.equal(spawns.length,5);assert.equal(spawns.filter(c=>c.params.agent==='delivery-coder').length,stage==='coder'?2:1);
+ assert.equal(spawns.length,8);assert.equal(spawns.filter(c=>c.params.agent==='delivery-coder').length,stage==='coder'?3:2);
  assert.ok(attempts.some(c=>c.params.task.includes('/fake/prior.jsonl')));
  assert.equal(state.connectionRetries[`0:0:${stage}`].count,1);
  assert.equal(state.interruptions.length,1);
@@ -880,10 +938,10 @@ test('pending connection retry survives restart and retains retry ceiling and re
  assert.equal(h.controller.state().stage,'blocked');assert.equal(h.controller.state().coding[0].spentMs,3000);
 });
 test('connection failure cannot extend an exhausted review budget',async()=>{
- const h=harness();h.deps.isSettled=()=>true;
+ const h=harness();const strictPlan={...plan,reviewPolicy:'strict'};h.deps.isSettled=()=>true;
  h.deps.runProgress=a=>a.stage==='spec'?{state:'failed',error:'Connection error.',model:a.model,attemptedModels:[a.model],durationMs:a.budgetMs,sessionFiles:[]}:null;
- await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',plan,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
- assert.equal(h.controller.state().stage,'blocked');assert.equal(h.calls.filter(c=>c.method==='spawn').length,2);
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',strictPlan,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'blocked');assert.equal(h.calls.filter(c=>c.method==='spawn').length,3);
 });
 
 for(const choice of ['accept','decline','no-ui','state-change'])test(`bare delivery offers retained recovery: ${choice}`,async()=>{
@@ -1082,6 +1140,12 @@ test('spec briefing scopes diff review to current task and never advertises pare
 test('quality briefing requires aggregate inspection through available read and bash tools',async()=>{
  const h=harness({version:1,routes, evidence:{},repos:['/repo'],workingTreeEvidence:()=> 'aggregate diff'});
  await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',{...plan,security:false},null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
- const reviewerCall=h.calls.find(c=>c.method==='spawn' && c.params?.agent==='delivery-reviewer' && c.params.task.includes('Independent quality'));assert.ok(reviewerCall,JSON.stringify({calls:h.calls,state:h.controller.state(),messages:h.messages}));const briefing=reviewerCall.params.task;
+ const reviewerCall=h.calls.find(c=>c.method==='spawn' && c.params?.agent==='delivery-reviewer' && c.params.task.includes('Independent aggregate-quality'));assert.ok(reviewerCall,JSON.stringify({calls:h.calls,state:h.controller.state(),messages:h.messages}));const briefing=reviewerCall.params.task;
  assert.match(briefing,/git diff --no-ext-diff/i);assert.match(briefing,/do not block solely because embedded evidence is truncated/i);
+});
+test('aggregate review briefing includes committed range and current correction artifact',async()=>{
+ const h=harness({version:1,routes,evidence:{},repos:['/repo'],workingTreeEvidence:()=> 'CURRENT_CORRECTION_MARKER'});let requested=false;
+ h.deps.readOutcome=a=>{if(a.stage==='aggregate-quality'&&!requested){requested=true;return {status:'changes_requested',summary:'aggregate correction',findings:['fix']};}return {status:'approved',summary:'ok',findings:[]};};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',{...plan,security:false},null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const aggregates=h.calls.filter(c=>c.method==='spawn' && c.params?.task.includes('Independent aggregate-quality'));assert.equal(aggregates.length,2);const aggregate=aggregates.at(-1);assert.match(aggregate.params.task,/BOUND COMMITTED RANGE/);assert.match(aggregate.params.task,/CURRENT_CORRECTION_MARKER/);assert.match(aggregate.params.task,/BOUND CURRENT WORKING-TREE CORRECTION/);
 });

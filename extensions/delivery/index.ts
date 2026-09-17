@@ -15,6 +15,8 @@ export default function (pi: ExtensionAPI) {
     plan: Type.Object({
       planFile: Type.Optional(Type.String({description:'Authoritative existing Markdown plan. After delivery_execute adopts it, derive its tasks here without changing scope; execution starts without repeated approval.'})),
       mode: Type.String({enum:['implementation','review'],description:'Infer from the request/context: review runs immediately without a coder; implementation waits for conversational approval.'}),
+      changeType: Type.Optional(Type.String({enum:['feature','bug','chore'],description:'Required for fresh implementation plans; omitted for review-plan schema compatibility.'})),
+      reviewPolicy: Type.Optional(Type.String({enum:['balanced','strict'],description:'Implementation review lifecycle: balanced (default) combines specification and quality review; strict opts into separate reviews.'})),
       start: Type.Optional(Type.Boolean({description:'Set false only when the user requested a plan without execution.'})),
       commits: Type.Optional(Type.Integer({minimum:1,maximum:20,description:'In review mode, pin the last N commits for validation.'})),
       title: Type.String({ maxLength: 200 }),
@@ -22,6 +24,7 @@ export default function (pi: ExtensionAPI) {
         title: Type.String({ maxLength: 200 }),
         instructions: Type.String({ maxLength: 16000 }),
         files: Type.Array(Type.String(), { minItems: 1, maxItems: 100 }),
+        sensitive: Type.Optional(Type.Boolean({description:'Explicitly mark this task security-sensitive; balanced policy runs task security review only when true.'})),
         checks: Type.Optional(Type.Array(Type.String(), {minItems:1,maxItems:10,description:'Implementation checks run after THIS task, before its independent reviews. Required for every implementation task. Never require files delivered by a later task.'})),
         acceptance: Type.Array(Type.String(), { minItems: 1, maxItems: 30 }),
       }), { minItems: 1, maxItems: 12 }),
