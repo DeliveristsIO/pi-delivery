@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, correctionPolicy, fixRoundLimit, createExecutionAuthority, executionAuthorityMatches } from '../extensions/delivery/policy.mjs';
+import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, validateFallbacks, correctionPolicy, fixRoundLimit, createExecutionAuthority, executionAuthorityMatches } from '../extensions/delivery/policy.mjs';
 
 export const routes = { planning: 'openai-codex/gpt-6-astra', coder: 'ollama-cloud/coder', spec: 'anthropic/reviewer', quality: 'anthropic/reviewer', security: 'openai-codex/reviewer' };
 export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: 'Implement fixture', files: ['src/a.js'], checks: ['node --test'], acceptance: ['Works'] }], checks: ['node --test'], risk: 'low', security: true };
@@ -17,12 +17,24 @@ test('routes require every exact model, never inherit', () => {
   assert.throws(() => validateRoutes({...routes, coder:undefined}, Object.values(routes)), /coder/);
   assert.deepEqual(validateRoutes(routes, Object.values(routes)), routes);
 });
+test('fallback routes are explicit, ordered, available and distinct from primaries',()=>{
+  const available=[...Object.values(routes),'custom/backup'];
+  assert.deepEqual(validateFallbacks({coder:['custom/backup']},routes,available),{planning:[],coder:['custom/backup'],spec:[],quality:[],security:[]});
+  assert.throws(()=>validateFallbacks({coder:[routes.coder]},routes,available),/Duplicate/);
+  assert.throws(()=>validateFallbacks({coder:['missing/model']},routes,available),/unavailable/);
+});
 test('plan must have bounded concrete scope and verification', () => {
   assert.deepEqual(validatePlan(plan), plan);
   assert.throws(() => validatePlan({...plan, checks:[]}), /checks/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], checks:undefined}]}), /explicit task.checks/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:['../escape']}]}), /files/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:[':(exclude)src/a.js']}]}), /files/);
+});
+test('correction adoption is an explicit implementation-only exact user attestation',()=>{
+ const adoption={kind:'retained-candidate',userTurn:'Implement the reviewed corrections'};
+ assert.deepEqual(validatePlan({...plan,mode:'implementation',correctionAdoption:adoption}).correctionAdoption,adoption);
+ assert.throws(()=>validatePlan({...plan,mode:'review',correctionAdoption:adoption}),/correctionAdoption.*implementation/i);
+ for(const invalid of [{kind:'other',userTurn:adoption.userTurn},{kind:'retained-candidate',userTurn:''},{kind:'retained-candidate',userTurn:adoption.userTurn,extra:true}])assert.throws(()=>validatePlan({...plan,mode:'implementation',correctionAdoption:invalid}),/correctionAdoption/i);
 });
 test('parent cannot edit, shell, delegate directly or bypass via custom tools', () => {
   for (const name of ['bash','powershell','edit','write','interactive_shell','mcp','subagent']) assert.equal(parentToolAllowed(name, {}), false, name);
@@ -88,6 +100,26 @@ test('new correction policy permits four rework rounds after the initial attempt
   }
   s=advance(s,bad,'tree');
   assert.equal(s.stage,'blocked');assert.match(s.reason,/round limit.*4/i);
+});
+test('correction feedback accumulates across rounds so fixes do not regress earlier findings',()=>{
+  let s={...approve({...initialState(),plan,stage:'awaiting-approval'},routes,'tree'),correctionPolicy:correctionPolicy(),stage:'quality'};
+  s=advance(s,{status:'changes_requested',summary:'first review',findings:['a:1 fix input']},'tree');
+  s.stage='quality';
+  s=advance(s,{status:'changes_requested',summary:'second review',findings:['a:2 preserve output']},'tree');
+  assert.match(s.feedback,/first review/);
+  assert.match(s.feedback,/second review/);
+  assert.match(s.feedback,/a:1 fix input/);
+});
+test('aggregate corrections have their own bounded budget',()=>{
+  const aggregate={...approve({...initialState(),plan,stage:'awaiting-approval'},routes,'tree'),correctionPolicy:{maxFixRounds:1,source:'configured'},gitPolicy:{reviewPolicy:'balanced'},stage:'aggregate-quality',round:4};
+  const bad={status:'changes_requested',summary:'integration defect',findings:['a:1 fix integration']};
+  const retry=advance(aggregate,bad,'tree');
+  assert.equal(retry.stage,'coder');
+  assert.equal(retry.aggregateRound,1);
+  assert.equal(retry.round,5);
+  const stopped=advance({...retry,stage:'aggregate-quality'},bad,'tree');
+  assert.equal(stopped.stage,'blocked');
+  assert.match(stopped.reason,/round limit.*1/i);
 });
 test('retained state without correction policy keeps two-round contract',()=>{
   assert.equal(fixRoundLimit({}),2);

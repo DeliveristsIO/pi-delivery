@@ -180,7 +180,7 @@ export function branchState(root) {
 }
 export function lifecyclePreflight(root) {
   const state=branchState(root);
-  if(!state.clean)throw new Error('Delivery requires a clean tracked and untracked worktree before proposal; commit or stash changes first. No automatic stash or baseline commit was created.');
+  if(!state.clean)throw new Error('Delivery requires a clean tracked and untracked worktree before proposal. Reviewed dirty work must use an explicitly authorized correctionAdoption plan; ordinary plans still require commit or stash. No automatic stash or baseline commit was created.');
   return state;
 }
 export function branchExists(root,name) {
@@ -265,6 +265,39 @@ export function assertApprovedPaths(root,approved,{allowStaged=false}={}) {
   const staged=git(root,['diff','--cached','--name-only','-z','--no-renames']).split('\0').filter(Boolean).sort();
   if(staged.length && !allowStaged)throw new Error('Pre-staged changes are not accepted; unstage them before delivery execution.');
   return approvedInventory(root,approved,{rejectOutside:true});
+}
+export function correctionCandidate(root,approved,{allowStaged=true}={}) {
+  const state=branchState(root);if(state.clean)throw new Error('Correction adoption requires an existing dirty candidate; use the ordinary clean-worktree lifecycle for new work.');
+  const inventory=assertApprovedPaths(root,approved,{allowStaged:true});
+  if(!inventory.length)throw new Error('Correction adoption requires at least one changed path in the approved correction scope.');
+  for(const path of inventory) {
+    const absolute=resolve(realpathSync(root),path);let st;
+    try {st=lstatSync(absolute);} catch(error) {if(error.code==='ENOENT')continue;throw error;}
+    if(st.isSymbolicLink())throw new Error(`Correction candidate path must not be a symlink: ${path}`);
+    if(!st.isFile())throw new Error(`Unsupported correction candidate entry: ${path}`);
+  }
+  const staged=stagedPaths(root);
+  if(!allowStaged && staged.length)throw new Error('Correction adoption does not accept staged paths for this operation.');
+  const fingerprintValue=fingerprint(root,{scope:approved});
+  return {version:1,branch:state.branch,head:state.head,defaultBranch:state.defaultBranch,clean:false,status:state.status,inventory,staged,fingerprint:fingerprintValue};
+}
+export function assertCorrectionCandidate(root,approved,expected) {
+  if(!expected || expected.version!==1)throw new Error('Missing correction candidate binding.');
+  const current=correctionCandidate(root,approved);
+  for(const key of ['branch','head','defaultBranch','status','fingerprint'])if(current[key]!==expected[key])throw new Error(`Correction candidate ${key} changed; obtain a fresh explicit adoption.`);
+  for(const key of ['inventory','staged'])if(JSON.stringify(current[key])!==JSON.stringify(expected[key]))throw new Error(`Correction candidate ${key} changed; obtain a fresh explicit adoption.`);
+  return current;
+}
+export function createCorrectionBranch(root,name,approved,expected) {
+  const current=assertCorrectionCandidate(root,approved,expected);
+  if(current.branch!==current.defaultBranch)throw new Error('Correction branch creation requires the bound default branch; continue an existing non-default branch without switching.');
+  if(branchExists(root,name))throw new Error(`Delivery branch already exists: ${name}. No alternate branch was selected.`);
+  execFileSync('git',['-c','core.fsmonitor=false','-C',root,'switch','--create',name],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
+  const after=branchState(root);
+  if(after.branch!==name || after.head!==expected.head)throw new Error('Correction branch or HEAD changed during adoption.');
+  const verified=correctionCandidate(root,approved);
+  if(verified.head!==expected.head || verified.fingerprint!==expected.fingerprint || JSON.stringify(verified.inventory)!==JSON.stringify(expected.inventory) || JSON.stringify(verified.staged)!==JSON.stringify(expected.staged))throw new Error('Correction candidate changed during branch creation.');
+  return after;
 }
 export function clearApprovedStagedPaths(root,approved) {
   const expected=safePaths(approved);

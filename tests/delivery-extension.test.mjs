@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync,mkdtempSync,copyFileSync,rmSync} from 'node:fs';
+import {existsSync,mkdtempSync,copyFileSync,rmSync,writeFileSync} from 'node:fs';
 import {homedir,tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {execFileSync} from 'node:child_process';
 import {registerDelivery} from '../extensions/delivery/extension.mjs';
+import {assertCorrectionCandidate,branchState,correctionCandidate,createCorrectionBranch,fingerprint,firstFreeBranch} from '../extensions/delivery/io.mjs';
 import {timeoutPolicy} from '../extensions/delivery/policy.mjs';
 const routes={planning:'openai-codex/gpt-6-astra',coder:'custom/c',spec:'custom/r',quality:'custom/r',security:'custom/s'};
 const plan={title:'Fixture',changeType:'feature',tasks:[{title:'Add',instructions:'Add one',files:['a'],checks:['node --test'],acceptance:['works']}],checks:['node --test'],risk:'low',security:true};
@@ -518,7 +521,7 @@ test('setup explains roles and model capabilities without evidence prompts',asyn
  h.ctx.ui.select=async(title,options)=>{selections.push({title,options});return options[0];};
  h.ctx.ui.confirm=async(title,body)=>{confirmations.push(body);return true;};
  await h.commands.delivery.handler('setup',h.ctx);
- assert.equal(selections.length,5);
+ assert.equal(selections.length,10);
  assert.match(selections[1].title,/implements.*tests/i);
  assert.match(selections[2].title,/acceptance criteria/i);
  assert.match(selections[3].title,/correctness/i);
@@ -965,6 +968,10 @@ test('attached recovery review finding restores the complete retained task and f
  await h.events.session_start({},h.ctx);await h.events.input({text:'Run a recovery review of the retained Task 1 work',source:'interactive'},h.ctx);
  const review={title:'Quento Task 1 recovery review',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review retained Task 1',instructions:'Review the retained implementation only',files:['task-1.js'],acceptance:['Task 1 is correct']}],checks:[],risk:'low',security:false};
  await h.tools.delivery_plan.execute('review',review,null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'blocked');assert.equal(h.calls.filter(call=>call.params?.agent==='delivery-coder').length,0,'read-only finding grants no corrective writer');
+ const userTurn='Implement the explicitly reviewed Task 1 correction';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ const candidate={version:1,branch:'feature/quento',head:'hash',defaultBranch:'main',clean:false,status:' M task-1.js',inventory:['task-1.js'],staged:[],fingerprint:'retained-hash'};h.deps.correctionCandidate=()=>candidate;h.deps.assertCorrectionCandidate=()=>candidate;
+ await h.tools.delivery_plan.execute('correct',{title:'Correct retained Task 1',mode:'implementation',changeType:'bug',reviewPolicy:'balanced',executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn},tasks:[{title:'Correct Task 1',instructions:'Correct the retained finding',files:['task-1.js'],checks:['check-1'],acceptance:['Task 1 is correct'],sensitive:false}],checks:['final-gate'],risk:'low',security:false},null,null,h.ctx);await h.controller.settled();
  const state=h.controller.state(),spawns=h.calls.filter(call=>call.method==='spawn');
  assert.equal(state.stage,'complete',JSON.stringify({reason:state.reason,task:state.task,round:state.round,active:state.active,retained:Boolean(state.retainedRun)}));assert.equal(state.plan.title,'Quento');assert.equal(state.plan.tasks.length,5);assert.deepEqual(state.plan.checks,['final-gate']);
  assert.ok(state.coding[0].spentMs>=1234);assert.equal(state.retainedRun.state.coding[0].spentMs,1234);assert.deepEqual(state.connectionRetries['0:0:quality'],{count:1,spentMs:50});assert.equal(state.correctionPolicy.maxFixRounds,4);
@@ -1080,6 +1087,9 @@ test('security recovery requires security policy and resumes only from a securit
  const recovery={title:'Security recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review security',instructions:'Review security only',files:['a'],acceptance:['secure']}],checks:[],risk:'low',security:false};
  await assert.rejects(h.tools.delivery_plan.execute('review',recovery,null,null,h.ctx),/security|matching/i);
  await h.tools.delivery_plan.execute('review',{...recovery,security:true},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'blocked');
+ const userTurn='Implement the retained security correction';await h.events.input({text:userTurn,source:'interactive'},h.ctx);const candidate={version:1,branch:'main',head:'hash',defaultBranch:'main',clean:false,status:' M a',inventory:['a'],staged:[],fingerprint:'hash'};h.deps.correctionCandidate=()=>candidate;h.deps.assertCorrectionCandidate=()=>candidate;h.deps.createCorrectionBranch=()=>({branch:'bug/security-correction',head:'hash',defaultBranch:'main',clean:false,status:' M a'});h.deps.firstFreeBranch=()=> 'bug/security-correction';h.deps.branchState=()=>({branch:'bug/security-correction',head:'hash',defaultBranch:'main',clean:false,status:' M a'});
+ await h.tools.delivery_plan.execute('correct',{...plan,title:'Security correction',mode:'implementation',changeType:'bug',reviewPolicy:'strict',security:true,executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn},tasks:[{...plan.tasks[0],files:['a'],sensitive:true}]},null,null,h.ctx);await h.controller.settled();
  const spawns=h.calls.filter(call=>call.method==='spawn');
  assert.equal(spawns[0].params.agent,'delivery-security');assert.equal(spawns[0].params.model,routes.security);
  assert.equal(spawns[1].params.agent,'delivery-coder');assert.match(spawns[1].params.task,/security defect/);
@@ -1128,6 +1138,66 @@ test('standalone read-only review never acquires retained implementation authori
  await h.tools.delivery_plan.execute('review',review,null,null,h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().plan.mode,'review');assert.equal(h.controller.state().stage,'complete');assert.equal(h.calls.filter(call=>call.params?.agent==='delivery-coder').length,0);
  assert.deepEqual(h.controller.state().reviewProvenance,{version:1,kind:'standalone'});assert.equal(h.controller.state().retainedRun,undefined);
+});
+test('reviewed dirty candidate enters correction only through exact explicit adoption without a checkpoint',async()=>{
+ const reviewPlan={title:'Dirty review',mode:'review',tasks:[{title:'Review candidate',instructions:'Review only',files:['a'],acceptance:['original behavior']}],checks:[],risk:'low',security:false};
+ const reviewed=oldRunEntry('blocked',routes,{plan:reviewPlan,task:0,round:0,reason:'Read-only validation found issues; fixes require a separate approved implementation plan.',reports:[{stage:'quality',task:0,round:0,snapshot:'hash',runId:'review',report:{status:'changes_requested',summary:'defect',findings:['high a:1 broken result; correct it']}}],reviewProvenance:{version:1,kind:'standalone'}});
+ const h=harness();h.entries.push(reviewed);h.deps.lifecyclePreflight=()=>{throw new Error('clean-worktree checkpoint loop');};
+ const candidate={version:1,branch:'main',head:'hash',defaultBranch:'main',clean:false,status:'M  a\0',inventory:['a'],staged:[],fingerprint:'hash'};
+ h.deps.correctionCandidate=()=>structuredClone(candidate);h.deps.assertCorrectionCandidate=()=>structuredClone(candidate);h.deps.createCorrectionBranch=()=>({branch:'feature/fix-reviewed-candidate',head:'hash',defaultBranch:'main',clean:false,status:' M a'});
+ h.deps.firstFreeBranch=()=> 'feature/fix-reviewed-candidate';h.deps.branchState=()=>({branch:'feature/fix-reviewed-candidate',head:'hash',defaultBranch:'main',clean:false,status:' M a'});
+ await h.events.session_start({},h.ctx);const userTurn='Implement the reviewed correction without discarding the candidate';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ const correction={...plan,title:'Fix reviewed candidate',security:false,tasks:[{...plan.tasks[0],files:['a'],acceptance:['original behavior','review finding corrected']}],executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn}};
+ await h.tools.delivery_plan.execute('correct',correction,null,null,h.ctx);await h.controller.settled();
+ const state=h.controller.state();assert.equal(state.stage,'complete',state.reason);assert.ok(state.adoptions?.length);assert.ok(state.adoptedEvidence?.reports?.length);assert.match(h.calls.find(call=>call.params?.agent==='delivery-coder').params.task,/broken result|original behavior/);
+});
+test('reviewed dirty candidate with checks adopts its dedicated content fingerprint',async()=>{
+ const reviewPlan={title:'Checked dirty review',mode:'review',tasks:[{title:'Review candidate',instructions:'Review only',files:['a'],checks:['review-check'],acceptance:['original behavior']}],checks:['review-final'],risk:'low',security:false};
+ const reviewed=oldRunEntry('blocked',routes,{plan:reviewPlan,snapshot:'checked-hash',reason:'Read-only validation found issues; fixes require a separate approved implementation plan.',reports:[{stage:'quality',task:0,round:0,snapshot:'checked-hash',report:{status:'changes_requested',summary:'defect',findings:['a:1 correct checked candidate']}}],reviewProvenance:{version:1,kind:'standalone'}});
+ const h=harness();h.entries.push(reviewed);h.deps.fingerprint=(_root,options)=>options.commands?.length?'checked-hash':'content-hash';
+ const candidate={version:1,branch:'main',head:'hash',defaultBranch:'main',clean:false,status:' M a',inventory:['a'],staged:[],fingerprint:'content-hash'};h.deps.correctionCandidate=()=>candidate;h.deps.assertCorrectionCandidate=()=>candidate;h.deps.createCorrectionBranch=()=>({branch:'feature/fixture',head:'hash',defaultBranch:'main',clean:false,status:' M a'});h.deps.branchState=()=>({branch:'feature/fixture',head:'hash',defaultBranch:'main',clean:false,status:' M a'});
+ await h.events.session_start({},h.ctx);const userTurn='Implement the checked reviewed correction';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ await h.tools.delivery_plan.execute('correct',{...plan,title:'Checked correction',security:false,executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn},tasks:[{...plan.tasks[0],files:['a']}]},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.equal(h.controller.state().adoptions[0].candidate.fingerprint,'content-hash');
+});
+test('review with checks adopts the real content-only dirty candidate and completes correction',async t=>{
+ const d=mkdtempSync(join(tmpdir(),'delivery-adoption-fingerprint-'));t.after(()=>rmSync(d,{recursive:true,force:true}));
+ execFileSync('git',['init','-q','-b','main',d]);writeFileSync(join(d,'a'),'base\n');execFileSync('git',['-C',d,'add','a']);execFileSync('git',['-C',d,'-c','user.name=T','-c','user.email=t@x','commit','-qm','base']);writeFileSync(join(d,'a'),'candidate\n');
+ const h=harness(),executed=[];h.deps.fingerprint=(_root,options)=>fingerprint(d,options);h.deps.correctionCandidate=(_root,scope)=>correctionCandidate(d,scope);h.deps.assertCorrectionCandidate=(_root,scope,expected)=>assertCorrectionCandidate(d,scope,expected);h.deps.firstFreeBranch=(_root,naming)=>firstFreeBranch(d,naming);h.deps.createCorrectionBranch=(_root,name,scope,expected)=>createCorrectionBranch(d,name,scope,expected);h.deps.branchState=()=>branchState(d);h.deps.commitApprovedTask=()=>{const state=branchState(d);return {hash:state.head,message:'fix: Correct candidate',branch:state.branch,baseHead:state.head,paths:['a'],snapshot:fingerprint(d,{scope:['a']})};};
+ h.deps.verifyCommand=async(_root,command)=>{executed.push([command,h.controller.state().stage]);return {command,code:0,output:'PASS'};};
+ let outcome=0;h.deps.readOutcome=()=>++outcome===1?{status:'changes_requested',summary:'defect',findings:['a:1 fix candidate']}:{status:'approved',summary:'corrected',findings:[]};
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Review the dirty checked candidate',source:'interactive'},h.ctx);
+ const reviewPlan={title:'Checked candidate review',mode:'review',tasks:[{title:'Review candidate',instructions:'Review only',files:['a'],acceptance:['candidate is correct']}],checks:['npm test'],risk:'low',security:false};
+ await h.tools.delivery_plan.execute('review',reviewPlan,null,null,h.ctx);await h.controller.settled();
+ const reviewed=h.controller.state(),candidate=correctionCandidate(d,['a']);assert.equal(reviewed.stage,'blocked');assert.equal(reviewed.candidateFingerprint,candidate.fingerprint);assert.equal(reviewed.snapshot,fingerprint(d,{scope:['a'],commands:['npm test']}));executed.length=0;
+ const userTurn='Implement the checked candidate correction';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+ const correction={title:'Checked correction',mode:'implementation',changeType:'bug',reviewPolicy:'balanced',executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn},tasks:[{title:'Correct candidate',instructions:'Fix the retained finding',files:['a'],checks:['node --test'],acceptance:['candidate is correct']}],checks:['node --test'],risk:'low',security:false};
+ await h.tools.delivery_plan.execute('correct',correction,null,null,h.ctx);await h.controller.settled();
+ const corrected=h.controller.state(),writers=h.calls.filter(call=>call.params?.agent==='delivery-coder');assert.equal(corrected.stage,'complete',corrected.reason);assert.ok(writers.length>=1);assert.equal(corrected.adoptions[0].candidate.fingerprint,candidate.fingerprint);assert.ok(writers.some(call=>/fix candidate|candidate is correct/i.test(call.params.task)));
+ assert.ok(executed.some(([command,stage])=>command==='npm test'&&stage==='final-checks'),'retained final check must run after adoption');
+});
+test('pending correction adoption survives reload with its exact candidate and evidence',async()=>{
+ const reviewPlan={title:'Reloaded dirty review',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['original behavior']}],checks:[],risk:'low',security:false};
+ const first=harness();first.entries.push(oldRunEntry('blocked',routes,{plan:reviewPlan,reason:'Read-only validation found issues; fixes require a separate approved implementation plan.',reports:[{stage:'quality',task:0,round:0,snapshot:'hash',report:{status:'changes_requested',summary:'defect',findings:['a:1 fix after reload']}}],reviewProvenance:{version:1,kind:'standalone'}}));
+ const candidate={version:1,branch:'main',head:'hash',defaultBranch:'main',clean:false,status:' M a',inventory:['a'],staged:[],fingerprint:'hash'};first.deps.correctionCandidate=()=>candidate;
+ await first.events.session_start({},first.ctx);const userTurn='Prepare and retain this explicit correction adoption';await first.events.input({text:userTurn,source:'interactive'},first.ctx);
+ await first.tools.delivery_plan.execute('correct',{...plan,title:'Reload correction',security:false,start:false,executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn},tasks:[{...plan.tasks[0],files:['a']}]},null,null,first.ctx);
+ const next=harness();next.entries.push(...structuredClone(first.entries));next.deps.correctionCandidate=()=>candidate;next.deps.assertCorrectionCandidate=()=>candidate;next.deps.createCorrectionBranch=()=>({branch:'feature/fixture',head:'hash',defaultBranch:'main',clean:false,status:' M a'});next.deps.branchState=()=>({branch:'feature/fixture',head:'hash',defaultBranch:'main',clean:false,status:' M a'});
+ await next.events.session_start({},next.ctx);assert.equal(next.controller.state().stage,'awaiting-approval');assert.equal(next.controller.state().correctionAdoption.candidate.fingerprint,'hash');
+ await next.events.input({text:'Approve the displayed retained correction',source:'interactive'},next.ctx);await next.tools.delivery_execute.execute('go',{},null,null,next.ctx);await next.controller.settled();
+ assert.equal(next.controller.state().stage,'complete');assert.match(next.calls.find(call=>call.params?.agent==='delivery-coder').params.task,/fix after reload|original behavior/);
+});
+test('correction adoption rejects absent consent and a changed candidate without launching a writer',async()=>{
+ const reviewPlan={title:'Dirty review',mode:'review',tasks:[{title:'Review',instructions:'Review only',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ for(const scenario of ['consent','changed']) {
+  const h=harness();h.entries.push(oldRunEntry('blocked',routes,{plan:reviewPlan,reason:'Read-only validation found issues; fixes require a separate approved implementation plan.',reports:[{stage:'quality',task:0,round:0,snapshot:'hash',report:{status:'changes_requested',summary:'defect',findings:['a:1 fix']}}],reviewProvenance:{version:1,kind:'standalone'}}));
+  const candidate={version:1,branch:'main',head:'hash',defaultBranch:'main',clean:false,status:' M a',inventory:['a'],staged:[],fingerprint:'hash'};h.deps.correctionCandidate=()=>candidate;h.deps.lifecyclePreflight=()=>{throw new Error('dirty worktree requires correction adoption');};h.deps.assertCorrectionCandidate=()=>{if(scenario==='changed')throw new Error('Correction candidate changed');return candidate;};
+  await h.events.session_start({},h.ctx);const userTurn='Implement the reviewed correction';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
+  const correction={...plan,title:'Fix reviewed candidate',security:false,tasks:[{...plan.tasks[0],files:['a']}],executionIntent:{kind:'explicit-implementation',userTurn},...(scenario==='consent'?{}:{correctionAdoption:{kind:'retained-candidate',userTurn}})};
+  if(scenario==='consent')await assert.rejects(h.tools.delivery_plan.execute('correct',correction,null,null,h.ctx),/clean-worktree|adoption|dirty|requires/i);
+  else await assert.rejects(h.tools.delivery_plan.execute('correct',correction,null,null,h.ctx),/candidate changed/i);
+  assert.equal(h.calls.filter(call=>call.method==='spawn').length,0);
+ }
 });
 
 for(const stage of ['coder','spec','quality','security'])test(`connection failure retries only the failed ${stage} on the approved route`,async()=>{

@@ -4,7 +4,7 @@ import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,rmSync} from 'node:fs
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {loadConfig,saveConfig,fingerprint,repoRoot,readOutcome} from '../extensions/delivery/io.mjs';
+import {loadConfig,saveConfig,fingerprint,repoRoot,readOutcome,correctionCandidate,assertCorrectionCandidate} from '../extensions/delivery/io.mjs';
 import {rpc} from '../extensions/delivery/rpc.mjs';
 function fixture(t) {const d=mkdtempSync(join(tmpdir(),'delivery-test-'));t.after(()=>rmSync(d,{recursive:true,force:true}));return d;}
 test('config default, atomic roundtrip, malformed input and symlink refusal', t=>{
@@ -38,4 +38,17 @@ test('RPC correlates replies and times out without installed owner',async()=>{
  const events={on:(n,f)=>{listeners.set(n,f);return()=>listeners.delete(n);},emit:(n,r)=>{if(n.endsWith(':request')) listeners.get('subagents:rpc:v1:reply:'+r.requestId)({version:1,requestId:r.requestId,success:true,data:{ok:true}});}};
  assert.deepEqual(await rpc(events,'ping',{},50),{ok:true});assert.equal(listeners.size,0);
  events.emit=()=>{};await assert.rejects(rpc(events,'ping',{},5),/timed out/);assert.equal(listeners.size,0);
+});
+test('correction candidate binds dirty Git ownership, inventory, index and content',t=>{
+ const d=fixture(t);execFileSync('git',['init','-q','-b','main',d]);writeFileSync(join(d,'a'),'base\n');execFileSync('git',['-C',d,'add','a']);execFileSync('git',['-C',d,'-c','user.name=T','-c','user.email=t@x','commit','-qm','base']);
+ writeFileSync(join(d,'a'),'candidate\n');writeFileSync(join(d,'new'),'new\n');execFileSync('git',['-C',d,'add','a']);
+ const candidate=correctionCandidate(d,['a','new']);assert.deepEqual(candidate.inventory,['a','new']);assert.deepEqual(candidate.staged,['a']);assert.equal(candidate.branch,'main');assert.equal(candidate.clean,false);
+ assert.deepEqual(assertCorrectionCandidate(d,['a','new'],candidate),candidate);
+ writeFileSync(join(d,'new'),'changed\n');assert.throws(()=>assertCorrectionCandidate(d,['a','new'],candidate),/changed|candidate|fingerprint/i);
+});
+test('correction candidate rejects out-of-scope work, foreign staging and symlink widening',t=>{
+ const d=fixture(t);execFileSync('git',['init','-q','-b','main',d]);writeFileSync(join(d,'a'),'base\n');writeFileSync(join(d,'outside'),'base\n');execFileSync('git',['-C',d,'add','-A']);execFileSync('git',['-C',d,'-c','user.name=T','-c','user.email=t@x','commit','-qm','base']);
+ writeFileSync(join(d,'a'),'candidate\n');writeFileSync(join(d,'outside'),'foreign\n');assert.throws(()=>correctionCandidate(d,['a']),/outside|scope/i);
+ execFileSync('git',['-C',d,'restore','outside']);execFileSync('git',['-C',d,'add','a']);assert.throws(()=>correctionCandidate(d,['a'],{allowStaged:false}),/staged/i);
+ execFileSync('git',['-C',d,'restore','--staged','a']);rmSync(join(d,'a'));symlinkSync('/etc/passwd',join(d,'a'));assert.throws(()=>correctionCandidate(d,['a']),/symlink/i);
 });

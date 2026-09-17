@@ -8,6 +8,9 @@ export default function (pi: ExtensionAPI) {
     configure: Type.Object({routes: Type.Optional(Type.Object(
       Object.fromEntries(['planning','coder','spec','quality','security'].map(role=>[role,Type.Optional(Type.String({maxLength:256,description:'Exact provider/model ID explicitly chosen by the user.'}))])),
       {additionalProperties:false,description:'Omit to inspect configured routes and available models. Changes show a confirmation and preserve retained work.'}
+    )),fallbacks: Type.Optional(Type.Object(
+      Object.fromEntries(['planning','coder','spec','quality','security'].map(role=>[role,Type.Optional(Type.Array(Type.String({maxLength:256}),{maxItems:3,description:'Ordered exact provider/model failover routes.'}))])),
+      {additionalProperties:false,description:'Optional ordered failover routes. Only recognized transport failures may use them.'}
     ))}),
     resume: Type.Object({taskChecks: Type.Optional(Type.Array(Type.Array(Type.String(), {minItems:1,maxItems:10}), {minItems:1,maxItems:12,description:'Legacy check-order recovery only: derive executable checks for EVERY existing task from the approved source plan. Keeps final checks, task scope and completed coder evidence; shows a correction confirmation. It is separate from correction-bound extension and final-exhaustion inspection.'}))}),
     execute: Type.Object({planFile: Type.Optional(Type.String({description:'Existing Markdown plan under docs/spark/plans/ explicitly requested for execution; no prior registration needed.'}))}),
@@ -23,6 +26,10 @@ export default function (pi: ExtensionAPI) {
         userTurn: Type.String({minLength:1,maxLength:16000,description:'Exact current interactive/RPC user turn whose conversational meaning explicitly requests implementation. Never attest questions, planning-only requests, rejection, deferral or ambiguity.'})
       }, {additionalProperties:false,description:'Planner attestation for explicit implementation intent. The controller binds it to this exact proposal, session, repository, workspace, routes, budgets, correction and review/security policy, then starts only the unchanged displayed plan.'})),
       reviewAttachment: Type.Optional(Type.Object({kind:Type.Literal('retained-recovery')},{additionalProperties:false,description:'Attach this requested read-only review to a matching failed retained implementation review. The controller verifies task scope, candidate, session, repository, routes and budgets; standalone reviews must omit it.'})),
+      correctionAdoption: Type.Optional(Type.Object({
+        kind: Type.Literal('retained-candidate'),
+        userTurn: Type.String({minLength:1,maxLength:16000,description:'Exact current interactive/RPC user turn explicitly authorizing corrective implementation of the retained dirty candidate.'})
+      },{additionalProperties:false,description:'Implementation-only recovery for a stopped failed review or implementation. Binds exact Git ownership, inventory, index and candidate fingerprint; never infer from findings or generic continuation text.'})),
       commits: Type.Optional(Type.Integer({minimum:1,maximum:20,description:'In review mode, pin the last N commits for validation.'})),
       title: Type.String({ maxLength: 200 }),
       tasks: Type.Array(Type.Object({

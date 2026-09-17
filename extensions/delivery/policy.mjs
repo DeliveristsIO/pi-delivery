@@ -30,6 +30,19 @@ export function validateRoutes(routes, available) {
   for (const role of ROLES) check(text(routes?.[role],256) && available.includes(routes[role]), `Missing/unavailable exact model route: ${role}. Select an available exact model using delivery_configure, or configure its provider with /login. /delivery setup is the interactive alternative.`);
   return Object.fromEntries(ROLES.map(r=>[r,routes[r]]));
 }
+export function validateFallbacks(fallbacks={}, routes={}, available) {
+  check(fallbacks && typeof fallbacks==='object' && !Array.isArray(fallbacks),'Invalid fallback routes');
+  for (const role of Object.keys(fallbacks)) {
+    check(ROLES.includes(role),`Unknown fallback role: ${role}`);
+    check(Array.isArray(fallbacks[role]) && fallbacks[role].length<=3,`Fallback routes for ${role} must contain 0–3 models`);
+    const seen=new Set([routes[role]]);
+    for (const id of fallbacks[role]) {
+      check(text(id,256) && available.includes(id),`Missing/unavailable exact fallback model for ${role}: ${id}`);
+      check(!seen.has(id),`Duplicate fallback model for ${role}: ${id}`);seen.add(id);
+    }
+  }
+  return Object.fromEntries(ROLES.map(role=>[role,structuredClone(fallbacks[role] || [])]));
+}
 export function validatePlan(input) {
   check(input && typeof input==='object' && JSON.stringify(input).length<=64000, 'Invalid or oversized plan');
   check(text(input.title,200), 'Invalid plan title');
@@ -43,6 +56,10 @@ export function validatePlan(input) {
   if(input.reviewAttachment!==undefined) {
     check(input.mode==='review' && input.reviewAttachment && typeof input.reviewAttachment==='object' && !Array.isArray(input.reviewAttachment),'reviewAttachment is only valid for read-only review plans');
     check(JSON.stringify(Object.keys(input.reviewAttachment))===JSON.stringify(['kind']) && input.reviewAttachment.kind==='retained-recovery','Invalid reviewAttachment attestation');
+  }
+  if(input.correctionAdoption!==undefined) {
+    check(input.mode!=='review' && input.correctionAdoption && typeof input.correctionAdoption==='object' && !Array.isArray(input.correctionAdoption),'correctionAdoption is only valid for implementation plans');
+    check(JSON.stringify(Object.keys(input.correctionAdoption).sort())===JSON.stringify(['kind','userTurn']) && input.correctionAdoption.kind==='retained-candidate' && text(input.correctionAdoption.userTurn,16000) && !input.correctionAdoption.userTurn.includes('\0'),'Invalid correctionAdoption attestation');
   }
   if(input.changeType!==undefined)check(input.mode!=='review' && CHANGE_TYPES.includes(input.changeType),'changeType must be feature, bug, or chore and is only valid for implementation plans');
   if(input.reviewPolicy!==undefined)check(input.mode!=='review' && REVIEW_POLICIES.includes(input.reviewPolicy),'reviewPolicy must be balanced or strict and is only valid for implementation plans');
@@ -133,7 +150,7 @@ export function fixRoundLimit(state) {
   for(const key of Object.keys(policy))check(key==='maxFixRounds' || key==='source',`Unknown correction policy setting: ${key}`);
   return correctionPolicy({maxFixRounds:policy.maxFixRounds}).maxFixRounds;
 }
-const authorityFields=['turn','userTurn','session','repository','plan','workspace','routes','timeouts','corrections','gitPolicy'];
+const authorityFields=['turn','userTurn','session','repository','plan','workspace','routes','timeouts','corrections','gitPolicy','adoption'];
 function authorityBinding(binding) {return Object.fromEntries(authorityFields.map(key=>[key,structuredClone(binding?.[key] ?? null)]));}
 export function createExecutionAuthority(binding) {
   check(text(binding?.turn,1024) && text(binding?.userTurn,16000) && !binding.userTurn.includes('\0'),'Execution authority requires an exact real-user turn');
@@ -145,7 +162,15 @@ export function executionAuthorityMatches(authority,binding) {
   return authority?.version===1 && JSON.stringify(authorityBinding(authority))===JSON.stringify(authorityBinding(binding));
 }
 export function initialState() {
-  return {version:1,enabled:false,stage:'planning',task:0,round:0,plan:null,routes:null,snapshot:null,active:null,reports:[],feedback:'',reason:'',gitPolicy:null,optimizerPasses:{},optimizerBypass:false,reviewedContentSnapshot:null,reviewContentCandidate:null};
+  return {version:1,enabled:false,stage:'planning',task:0,round:0,aggregateRound:0,plan:null,routes:null,fallbacks:null,snapshot:null,active:null,reports:[],feedback:'',reason:'',gitPolicy:null,optimizerPasses:{},optimizerBypass:false,reviewedContentSnapshot:null,reviewContentCandidate:null};
+}
+function cumulativeFeedback(previous, report) {
+  const entry=JSON.stringify({summary:report.summary,findings:report.findings});
+  const lines=previous ? previous.split('\n\n') : [];
+  if(lines.some(line=>line===entry)) return previous;
+  // Keep the contract bounded while retaining recent actionable reports. This
+  // prevents a long repair history from crowding out the task instructions.
+  return [...lines,entry].slice(-6).join('\n\n').slice(-12000);
 }
 function lifecycleReviewPolicy(state) { return state?.gitPolicy?.reviewPolicy || null; }
 function taskNeedsSecurity(state) {
@@ -159,15 +184,18 @@ function afterTaskReview(state) {
   if(state.task+1<state.plan.tasks.length)return state.plan.mode==='review'?'spec':'coder';
   return 'verification';
 }
-export function approve(state, routes, snapshot) {
+export function approve(state, routes, snapshot, fallbacks={}) {
   check(state.stage==='awaiting-approval' && state.plan, 'No proposed plan awaiting approval');
   const plan=validatePlan(state.plan);
   // A plan without a retained lifecycle policy is legacy state and must not
   // acquire branch/commit behavior merely because its plan data has a type.
-  return {...initialState(),enabled:true,plan,routes:structuredClone(routes),stage:plan.mode==='review'?'review-checks':'coder',snapshot,gitPolicy:state.gitPolicy ? structuredClone(state.gitPolicy) : null};
+  return {...initialState(),enabled:true,plan,routes:structuredClone(routes),fallbacks:structuredClone(fallbacks),stage:plan.mode==='review'?'review-checks':'coder',snapshot,gitPolicy:state.gitPolicy ? structuredClone(state.gitPolicy) : null};
 }
 export function advance(state, report, snapshot) {
   const s=structuredClone(state);
+  // Retained runs created before aggregate correction tracking are upgraded
+  // in memory without changing their existing task round.
+  s.aggregateRound ||= 0;
   if (s.stage==='verification') {
     check(report?.verified===true,'Completion requires host verification');
     check(snapshot===s.snapshot,'Workspace changed during verification');
@@ -200,15 +228,15 @@ export function advance(state, report, snapshot) {
   if(report.status==='changes_requested') {
     if(s.plan.mode==='review')return {...s,stage:'blocked',reason:'Read-only validation found issues; fixes require a separate approved implementation plan.'};
     if(s.gitPolicy && (s.stage==='aggregate-quality' || s.stage==='aggregate-security')) {
-      if(s.round>=fixRoundLimit(s))return {...s,stage:'blocked',reason:`Fix/review round limit exhausted (${fixRoundLimit(s)})`};
-      s.aggregateCorrection=true;s.stage='coder';s.round+=1;s.feedback=JSON.stringify(report);return s;
+      if(s.aggregateRound>=fixRoundLimit(s))return {...s,stage:'blocked',reason:`Fix/review round limit exhausted (${fixRoundLimit(s)})`};
+      s.aggregateCorrection=true;s.stage='coder';s.aggregateRound+=1;s.round+=1;s.feedback=cumulativeFeedback(s.feedback,report);return s;
     }
     if(s.optimizerPasses?.[s.task]?.ran) s.optimizerBypass=true;
     if(s.round>=fixRoundLimit(s)) {
       const limit=fixRoundLimit(s);
       return {...s,stage:'blocked',reason:`Fix/review round limit exhausted (${limit})`};
     }
-    return {...s,stage:'coder',round:s.round+1,feedback:JSON.stringify(report)};
+    return {...s,stage:'coder',round:s.round+1,feedback:cumulativeFeedback(s.feedback,report)};
   }
   if(s.stage==='coder') s.stage='checks';
   else if(s.stage==='checks' && s.aggregateCorrection) s.stage='final-checks';

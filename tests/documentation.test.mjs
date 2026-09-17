@@ -20,6 +20,13 @@ test('public documentation relative links resolve',()=>{
   }
  }
 });
+test('recovery documentation explains explicit dirty-candidate adoption and reload limits',()=>{
+ const configuration=readFileSync(resolve(root,'docs/configuration.md'),'utf8');const readme=readFileSync(resolve(root,'README.md'),'utf8');
+ for(const text of [configuration,readme]) {
+  assert.match(text,/correctionAdoption/);assert.match(text,/branch.*HEAD.*inventory.*index.*fingerprint/is);assert.match(text,/no (?:WIP )?commit.*stash.*baseline commit/is);assert.match(text,/reload|restart/i);
+  assert.match(text,/standalone.*review.*(?:read-only|no write|does not).*author/i);assert.match(text,/full adopted candidate|original changes/i);
+ }
+});
 test('configuration documentation defines the version-1 correction policy migration',()=>{
  const configuration=readFileSync(resolve(root,'docs/configuration.md'),'utf8');
  const readme=readFileSync(resolve(root,'README.md'),'utf8');

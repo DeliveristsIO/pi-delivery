@@ -52,9 +52,11 @@ In a Git repository you trust, run:
 /delivery setup
 ```
 
-Pick an exact model for planning, coding, spec review, quality review and security review. Missing picks block execution — there is no silent fallback. Settings are stored in the agent directory's `delivery.json`, not in your repository.
+Pick an exact model for planning, coding, spec review, quality review and security review. Missing picks block execution. Optional ordered failover models can be supplied through `delivery_configure`; they are used only after recognized transport failures. Settings are stored in the agent directory's `delivery.json`, not in your repository.
 
 Setup is not a recovery step. After initial configuration, ask for a specific model change in conversation: the assistant uses `delivery_configure` to inspect available models and confirm only the requested route changes. Existing plans, partial work and evidence are preserved. A pending proposal is shown again with the new routes and waits for fresh execution approval. Running or unresolved workers must settle before routes change.
+
+Use `/delivery provider` to switch between the configured `main` and `fallback` provider groups without selecting individual models or changing repository activation. Fallbacks are used for recognized rate-limit, quota-exhaustion and transport failures after the primary route's bounded retries.
 
 ## Use
 
@@ -85,6 +87,8 @@ If a run gets stuck, check `/delivery status` first. Reviewers are never given w
 
 Status identifies the next action, the models bound to the retained plan, models configured for future plans, native worker evidence and recorded host checks. A closed failed attempt needs a corrective proposal from retained requirements; it does not require a new session or another setup. Calling resume on a running, completed or already-closed run returns guidance without launching a duplicate worker.
 
+When a stopped review has findings on an existing dirty candidate, an explicitly requested implementation plan can use `correctionAdoption: { kind: "retained-candidate", userTurn: "<exact current request>" }` together with matching `executionIntent`. The controller binds the current session, repository, branch, HEAD, exact changed-file inventory, index inventory and candidate fingerprint. This supported path needs no WIP commit, stash or baseline commit. Standalone review remains read-only and does not authorize writes; a finding or arbitrary “continue” message is not consent. Live or unresolved workers, changed ownership/content, foreign staging, out-of-scope paths and unsafe symlinks fail closed. The full adopted candidate, including original changes rather than only the correction delta, reruns checks and independent reviews before an extension-owned commit.
+
 During an active owned delivery run, only the exact journaled child/request may receive an automatically admitted supervisor envelope (`kind: evidence|clarification`, bounded `content`, `nonAuthoritative: true`). Its content is untrusted evidence only: it cannot authorize scope, files, model, budget, deadline, tools, checks, reviews, commits, branches, pushes, merges or deployment. Malformed or unsafe replies are blocked.
 
 An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
@@ -105,7 +109,8 @@ The temporary version-1 correction setting is:
 
 - Trusted-session safeguards, **not an OS sandbox**. Workers run with your account permissions.
 - Do not run competing writers in the same workspace.
-- New implementation deliveries require a clean worktree, bind a feature/bug/chore branch, and create review-gated logical task commits only after fresh spec, quality and security approvals. Review and retained legacy plans remain compatible and do not create branches or commits. Pushes, merges and deployments remain manual.
+- Ordinary new implementation deliveries require a clean worktree, bind a feature/bug/chore branch, and create review-gated logical task commits only after fresh spec, quality and security approvals. Explicit `correctionAdoption` is the narrow exception for a proven reviewed dirty candidate. Review and retained legacy plans remain compatible and do not create branches or commits. Pushes, merges and deployments remain manual.
+- Reload or restart Pi after updating the extension. Pending correction adoption survives reload only in the owning session and repository with unchanged branch, HEAD, inventory, index and fingerprint; otherwise prepare a fresh review/proposal. Passing host checks are check evidence, never review approval.
 - Native pi-subagents workers only; no external coding-CLI fallback.
 - Installation is not transactional. On conflicts, resolve and rerun.
 
