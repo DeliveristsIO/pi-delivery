@@ -106,14 +106,219 @@ function pathspecs(paths) {
   for(const path of paths) {
     if(typeof path!=='string' || !path || path.startsWith('/') || path.startsWith(':') || path.includes('\\') || path.includes('\0') || path.split('/').includes('..') || path.split('/').includes('.git'))throw new Error('Invalid evidence path');
   }
-  return ['--',...paths];
+  // `--` ends option parsing but does not disable Git pathspec magic. Prefix
+  // every approved path with literal magic so names containing *, ? or [ can
+  // never widen evidence or staging to another path.
+  return ['--',...paths.map(path=>`:(literal)${path}`)];
+}
+const EVIDENCE_LIMIT=40000;
+const evidenceRecovery=(paths)=>paths?.length
+  ? `\n[Working-tree evidence preview truncated at ${EVIDENCE_LIMIT} characters. Continue with repository-local read tools and git diff --no-ext-diff -- ${paths.join(' ')}.]`
+  : `\n[Working-tree evidence preview truncated at ${EVIDENCE_LIMIT} characters. Continue with repository-local read tools and git diff --no-ext-diff -- <path>.]`;
+export function boundEvidence(value,paths,limit=EVIDENCE_LIMIT) {
+  if(value.length<=limit)return value;
+  const recovery=evidenceRecovery(paths);
+  return value.slice(0,Math.max(0,limit-recovery.length))+recovery;
 }
 export function workingTreeEvidence(root,paths) {
   const scope=pathspecs(paths);
   const status=git(root,['status','--short','--untracked-files=all',...scope]);
   const tracked=git(root,['diff','--no-ext-diff','HEAD',...scope]);
-  const untracked=git(root,['ls-files','--others','--exclude-standard',...scope]);
-  return `STATUS (scoped paths only):\n${status}TRACKED WORKING-TREE DIFF:\n${tracked}UNTRACKED PATHS (scoped; inspect contents with read):\n${untracked}`;
+  const untracked=git(root,['ls-files','-z','--others','--exclude-standard',...scope]).split('\0').filter(Boolean);
+  const contents=untracked.map(path=>{
+    const absolute=resolve(root,path);
+    try {
+      const st=lstatSync(absolute);
+      if(!st.isFile() || st.isSymbolicLink())return `--- ${path} ---\n[non-regular untracked entry; inspect with repository-local read tools]`;
+      // Keep individual reads bounded; the outer evidence bound supplies the
+      // single child-safe continuation marker for the complete artifact.
+      const bytes=readFileSync(absolute);const clipped=bytes.length>65536;
+      return `--- ${path} ---\n${bytes.subarray(0,65536).toString('utf8')}${clipped?'\n[untracked file content preview clipped]':''}`;
+    } catch(error) { return `--- ${path} ---\n[untracked content unavailable: ${error.message}]`; }
+  }).join('\n');
+  return boundEvidence(`STATUS (scoped paths only):\n${status}TRACKED WORKING-TREE DIFF:\n${tracked}UNTRACKED PATHS (scoped):\n${untracked.join('\n')}\nUNTRACKED FILE CONTENTS (scoped; included in this bounded artifact):\n${contents}`,paths);
+}
+const fiftyTwo=52;
+export function normalizeSlug(title,max=fiftyTwo) {
+  if(typeof title!=='string')throw new Error('Invalid branch title');
+  const slug=title.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').replace(/-+/g,'-').slice(0,max).replace(/-+$/g,'');
+  if(!slug)throw new Error('Branch slug is empty; use a title containing letters or numbers');
+  return slug;
+}
+export const CHANGE_TYPES=['feature','bug','chore'];
+export function branchPlan(title,changeType) {
+  if(!CHANGE_TYPES.includes(changeType))throw new Error('changeType must be feature, bug, or chore');
+  const prefix=changeType+'/';const slug=normalizeSlug(title);return {prefix,slug,branch:prefix+slug};
+}
+export function firstFreeBranch(root,{prefix,slug}) {
+  if(typeof prefix!=='string' || !prefix || typeof slug!=='string' || !slug)throw new Error('Invalid branch naming components');
+  for(let suffix=1;suffix<=10000;suffix++) {
+    const name=`${prefix}${slug}${suffix===1?'':`-${suffix}`}`;
+    if(!branchExists(root,name))return name;
+  }
+  throw new Error('Unable to select a free delivery branch name.');
+}
+export function commitPlanMessage(changeType,title) {
+  if(!CHANGE_TYPES.includes(changeType))throw new Error('changeType must be feature, bug, or chore');
+  if(typeof title!=='string')throw new Error('Invalid commit summary');
+  const summary=title.replace(/[\r\n\t]+/g,' ').replace(/\s+/g,' ').trim();
+  const message=`${changeType==='feature'?'feat':changeType}: ${summary}`;
+  if(!summary || message.length>100 || /[\u0000-\u001f\u007f]/.test(message))throw new Error('Invalid commit message');
+  return message;
+}
+function gitText(root,args) {return git(root,args).trim();}
+export function defaultBranch(root) {
+  try {const ref=gitText(root,['symbolic-ref','--quiet','refs/remotes/origin/HEAD']);if(ref.startsWith('refs/remotes/origin/'))return ref.slice('refs/remotes/origin/'.length);} catch {}
+  for(const candidate of ['main','master']) {try {if(gitText(root,['show-ref','--verify',`refs/heads/${candidate}`]))return candidate;} catch {}}
+  throw new Error('Cannot determine the default branch without network access; create or check out local main/master or configure origin/HEAD.');
+}
+export function branchState(root) {
+  let branch;try {branch=gitText(root,['symbolic-ref','--quiet','--short','HEAD']);} catch {throw new Error('HEAD is detached or unavailable; check out a named branch before delivery.');}
+  let head;try {head=gitText(root,['rev-parse','HEAD']);} catch {throw new Error('HEAD is unborn; create the initial repository history before delivery.');}
+  const status=git(root,['status','--porcelain=v1','--untracked-files=all']);
+  return {branch,head,defaultBranch:defaultBranch(root),clean:status.length===0,status};
+}
+export function lifecyclePreflight(root) {
+  const state=branchState(root);
+  if(!state.clean)throw new Error('Delivery requires a clean tracked and untracked worktree before proposal; commit or stash changes first. No automatic stash or baseline commit was created.');
+  return state;
+}
+export function branchExists(root,name) {
+  if(typeof name!=='string' || !name || name.startsWith('-') || name.includes('..') || name.includes('\\0') || name.includes('\0'))throw new Error('Invalid branch name');
+  try {git(root,['show-ref','--verify','--quiet',`refs/heads/${name}`]);return true;} catch {return false;}
+}
+export function createDeliveryBranch(root,name,expectedHead) {
+  const state=branchState(root);
+  if(state.branch!==state.defaultBranch)throw new Error('Base branch changed before branch creation; refresh the delivery proposal.');
+  if(state.head!==expectedHead)throw new Error('Base HEAD changed before branch creation; refresh the delivery proposal.');
+  if(!state.clean)throw new Error('Worktree changed before branch creation; commit or stash changes first.');
+  if(branchExists(root,name))throw new Error(`Delivery branch already exists: ${name}. No alternate branch was selected.`);
+  execFileSync('git',['-c','core.fsmonitor=false','-C',root,'switch','--create',name],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
+  return branchState(root);
+}
+function safePaths(paths) {
+  if(!Array.isArray(paths)||!paths.length)throw new Error('Approved path set must not be empty');
+  for(const p of paths)if(typeof p!=='string'||!p||p.startsWith(':')||p.startsWith('/')||p.includes('\\0')||p.includes('\0')||p.split('/').includes('..')||p.split('/').includes('.git'))throw new Error('Invalid approved path');
+  return [...new Set(paths)].sort();
+}
+function literalPathspecs(paths) {
+  return paths.map(path=>`:(literal)${path}`);
+}
+export function scopedContentFingerprint(root,paths) {
+  const expected=safePaths(paths);const h=createHash('sha256');
+  h.update(git(root,['rev-parse','HEAD']).trim());
+  for(const path of expected) {
+    const absolute=resolve(root,path);h.update('\0'+path+'\0');
+    let st;try {st=lstatSync(absolute);} catch(error) {if(error.code==='ENOENT'){h.update('deleted\0');continue;}throw error;}
+    if(st.isSymbolicLink()) {h.update('symlink\0'+readlinkSync(absolute)+'\0');continue;}
+    if(!st.isFile())throw new Error(`Unsupported approved workspace entry: ${path}`);
+    h.update('file\0'+readFileSync(absolute));
+  }
+  return h.digest('hex');
+}
+function canonicalDiff(body) {
+  return body.replace(/^diff --git c\/(.*) i\/(.*)$/gm,'diff --git a/$1 b/$2').replace(/^--- c\//gm,'--- a/').replace(/^\+\+\+ i\//gm,'+++ b/');
+}
+export function stagedDiffHash(root) {
+  const body=git(root,['diff','--cached','--no-ext-diff','--no-textconv','--no-renames','--binary','--full-index','--']);
+  return createHash('sha256').update(canonicalDiff(body)).digest('hex');
+}
+export function commitDiffHash(root,commit,paths) {
+  const args=['show','--format=','--no-ext-diff','--no-textconv','--no-renames','--binary','--full-index',commit];
+  if(paths!==undefined)args.push('--',...literalPathspecs(paths));
+  const body=git(root,args);
+  return createHash('sha256').update(canonicalDiff(body)).digest('hex');
+}
+export function commitPaths(root,commit) {
+  return git(root,['diff-tree','--no-commit-id','--name-only','--no-renames','-r','-z','--root',commit]).split('\0').filter(Boolean).sort();
+}
+export function changedPaths(root) {
+  const raw=git(root,['status','--porcelain=v1','-z','--untracked-files=all']);
+  const result=[];for(const entry of raw.split('\0')) {if(!entry)continue;const value=entry.slice(3);result.push(value.startsWith('"')?JSON.parse(value):value);}
+  return [...new Set(result)].sort();
+}
+export function assertApprovedPaths(root,approved,{allowStaged=false}={}) {
+  const expected=safePaths(approved);
+  const staged=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  if(staged.length && !allowStaged)throw new Error('Pre-staged changes are not accepted; unstage them before delivery execution.');
+  const actual=changedPaths(root),outside=actual.filter(path=>!expected.includes(path));
+  if(outside.length)throw new Error(`Changed paths outside the approved task scope: ${outside.join(', ')}.`);
+  return actual;
+}
+export function clearApprovedStagedPaths(root,approved) {
+  const expected=safePaths(approved);
+  const staged=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  const outside=staged.filter(path=>!expected.includes(path));
+  if(outside.length)throw new Error(`Refusing to clear staged paths outside extension ownership: ${outside.join(', ')}.`);
+  if(staged.length)execFileSync('git',['-c','core.fsmonitor=false','-C',root,'restore','--staged','--',...literalPathspecs(staged)],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
+  return staged;
+}
+export function branchCommitState(root,expectedHead) {
+  const state=branchState(root);if(expectedHead && state.head!==expectedHead)throw new Error('Branch HEAD changed outside delivery orchestration.');return state;
+}
+export function commitApprovedTask(root,{changeType,title,files,expectedHead,snapshot,scope=[],allowStaged=false,expectedAuthorization,onPrepared,onBeforeStage}) {
+  const state=branchCommitState(root,expectedHead);
+  let paths;
+  try {paths=assertApprovedPaths(root,files,{allowStaged});}
+  catch(error) {
+    if(expectedAuthorization) {error.commitAuthorizationInvalid=true;error.message='Approved staged content changed after commit failure; commit resume authority was invalidated. Re-run checks and reviews.';}
+    throw error;
+  }
+  const existing=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  if(existing.length && JSON.stringify(existing)!==JSON.stringify([...paths].sort())) {
+    const error=new Error(expectedAuthorization?'Approved staged content changed after commit failure; commit resume authority was invalidated.':'Existing staged paths differ from the approved task scope.');
+    if(expectedAuthorization)error.commitAuthorizationInvalid=true;throw error;
+  }
+  if(!paths.length)throw new Error('Cannot create an empty delivery commit.');
+  const message=commitPlanMessage(changeType,title);
+  const reviewedSnapshot=scopedContentFingerprint(root,paths);
+  const rejectSnapshot=()=>{const error=new Error('Reviewed task snapshot changed before delivery staging; commit authorization was invalidated. Re-run checks and reviews.');error.commitAuthorizationInvalid=true;throw error;};
+  if(reviewedSnapshot!==snapshot)rejectSnapshot();
+  // Test/runtime seam is invoked only after outer path validation and before
+  // staging, so a concurrent mutation cannot be mistaken for reviewed content.
+  onBeforeStage?.();
+  if(scopedContentFingerprint(root,paths)!==snapshot)rejectSnapshot();
+  if(!existing.length)execFileSync('git',['-c','core.fsmonitor=false','-C',root,'add','--',...literalPathspecs(paths)],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
+  if(scopedContentFingerprint(root,paths)!==snapshot)rejectSnapshot();
+  const staged=git(root,['diff','--cached','--name-only','-z']).split('\0').filter(Boolean).sort();
+  if(JSON.stringify(staged)!==JSON.stringify([...paths].sort())) {
+    const error=new Error(expectedAuthorization?'Approved staged content changed after commit failure; commit resume authority was invalidated.':'Staged paths differ from the reviewed accepted path set.');
+    if(expectedAuthorization)error.commitAuthorizationInvalid=true;throw error;
+  }
+  try {execFileSync('git',['-c','core.fsmonitor=false','-C',root,'diff','--cached','--check'],{encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});}
+  catch {const error=new Error('Staged delivery diff failed whitespace checks.');if(expectedAuthorization)error.commitAuthorizationInvalid=true;throw error;}
+  const authorization={branch:state.branch,head:state.head,paths, snapshot, diffHash:stagedDiffHash(root)};
+  if(expectedAuthorization) {
+    if(JSON.stringify(expectedAuthorization.paths)!==JSON.stringify(authorization.paths) || expectedAuthorization.branch!==authorization.branch || expectedAuthorization.head!==authorization.head || expectedAuthorization.snapshot!==authorization.snapshot || expectedAuthorization.diffHash!==authorization.diffHash) {
+      const error=new Error('Approved staged content changed after commit failure; commit resume authority was invalidated. Re-run checks and reviews.');
+      error.commitAuthorizationInvalid=true;throw error;
+    }
+  }
+  onPrepared?.(structuredClone(authorization));
+  try {execFileSync('git',['-c','core.fsmonitor=false','-C',root,'commit','-m',message],{encoding:'utf8',timeout:120000,stdio:['ignore','pipe','pipe'],env:{...process.env,GIT_TERMINAL_PROMPT:'0'}});}
+  catch(error) {
+    const wrapped=new Error(`Git commit failed: ${error.message}`);wrapped.commitAuthorization=authorization;throw wrapped;
+  }
+  const next=branchState(root);
+  if(next.head===state.head)throw new Error('Delivery commit did not advance HEAD.');
+  // A successful Git command is not enough: post-commit hooks may have
+  // amended the commit. Compare the committed diff before recording lifecycle
+  // authority, and never adopt a hash whose tree differs from what was staged.
+  const committedPaths=commitPaths(root,next.head);
+  const committedDiffHash=commitDiffHash(root,next.head);
+  if(JSON.stringify(committedPaths)!==JSON.stringify(authorization.paths) || committedDiffHash!==authorization.diffHash) {
+    const error=new Error('Successful delivery commit differs from the accepted staged content or path set; commit was not adopted.');
+    error.commitCompleted=true;throw error;
+  }
+  if(!next.clean) {
+    const error=new Error('Delivery commit left a dirty worktree; commit was not adopted.');
+    error.commitCompleted=true;throw error;
+  }
+  return {hash:next.head,message,branch:next.branch,baseHead:state.head,paths,snapshot,acceptedSnapshot:authorization.snapshot,acceptedDiffHash:authorization.diffHash,acceptedPaths:authorization.paths};
+}
+export function commitRecord(root,{changeType,title,files,expectedHead}) {
+  const state=branchCommitState(root,expectedHead);const paths=assertApprovedPaths(root,files);const message=commitPlanMessage(changeType,title);
+  return {branch:state.branch,baseHead:state.head,expectedHead:state.head,paths,message};
 }
 export function diff(root,range,limit=40000,offset=0,paths) {
   const scope=pathspecs(paths);

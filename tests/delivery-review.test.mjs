@@ -32,7 +32,11 @@ test('working-tree evidence includes staged tracked changes and scopes untracked
  writeFileSync(join(d,'app','a.rb'),'staged change\n');execFileSync('git',['-C',d,'add','app/a.rb']);
  writeFileSync(join(d,'app','new.rb'),'untracked\n');writeFileSync(join(d,'other','new.rb'),'unrelated\n');
  const evidence=workingTreeEvidence(d,['app/a.rb','app/new.rb']);
- assert.match(evidence,/staged change/);assert.match(evidence,/app\/new\.rb/);assert.doesNotMatch(evidence,/other\/new\.rb/);assert.doesNotMatch(evidence,/other\/b\.rb/);
+ assert.match(evidence,/staged change/);assert.match(evidence,/app\/new\.rb/);assert.match(evidence,/UNTRACKED FILE CONTENTS/);assert.match(evidence,/untracked/);assert.doesNotMatch(evidence,/other\/new\.rb/);assert.doesNotMatch(evidence,/other\/b\.rb/);
+});
+test('working-tree evidence clips complete untracked content with child-safe recovery guidance',t=>{
+ const d=repo(t);writeFileSync(join(d,'base'),'base\n');execFileSync('git',['-C',d,'add','base']);execFileSync('git',['-C',d,'-c','user.name=Test','-c','user.email=test@localhost','commit','-qm','base']);writeFileSync(join(d,'new.txt'),'UNTRACKED_MARKER\n'+'x'.repeat(50000));
+ const evidence=workingTreeEvidence(d,['new.txt']);assert.match(evidence,/new\.txt/);assert.match(evidence,/UNTRACKED_MARKER/);assert.match(evidence,/Working-tree evidence preview truncated at 40000 characters/);assert.match(evidence,/repository-local read tools/);assert.match(evidence,/git diff --no-ext-diff -- new\.txt/);assert.ok(evidence.length<=40000+220);
 });
 test('evidence pathspecs reject Git include and exclude magic consistently',t=>{
  const d=repo(t);writeFileSync(join(d,'a'),'tracked\n');execFileSync('git',['-C',d,'add','a']);
