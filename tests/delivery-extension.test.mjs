@@ -376,6 +376,7 @@ test('balanced optimizer source changes rerun task checks exactly once before co
 });
 test('approved task content race before commit is rejected and re-reviewed without adoption',async()=>{
  const h=harness();let mutated=false,commitAttempts=0,adopted=0;
+ h.deps.assertApprovedPaths=()=>['a'];
  h.deps.scopedContentFingerprint=()=>mutated?'raced-content':'accepted-content';
  h.deps.beforeCommit=()=>{if(!mutated)mutated=true;};
  h.deps.commitApprovedTask=(_root,options)=>{
@@ -389,6 +390,22 @@ test('approved task content race before commit is rejected and re-reviewed witho
  assert.equal(h.controller.state().stage,'complete');assert.equal(qualityReports.length,2);
  assert.equal(commitAttempts,2);assert.equal(adopted,1);assert.equal(h.controller.state().gitPolicy.commits.length,1);
  assert.equal(qualityReports[0].report.reviewedContentSnapshot,'accepted-content');assert.equal(qualityReports[1].report.reviewedContentSnapshot,'raced-content');
+});
+test('verification-only task with no changed paths skips the commit stage and advances cleanly',async()=>{
+ const h=harness();let commitAttempts=0;
+ h.deps.commitApprovedTask=()=>{commitAttempts++;throw new Error('Cannot create an empty delivery commit.');};
+ await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('id',plan,null,null,h.ctx);
+ await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
+ const after=h.controller.state();
+ assert.equal(after.stage,'complete');
+ assert.equal(after.reason,'');
+ assert.equal(commitAttempts,0);
+ assert.ok(h.calls.some(c=>c.method==='spawn'&&c.params.agent==='delivery-coder'));
+ assert.equal(after.reports.some(r=>r.stage==='commit'&&r.report.committed===true),true);
+ assert.equal(after.gitPolicy.commits.length,1);
+ assert.equal(after.gitPolicy.commits[0].hash,after.gitPolicy.expectedHead);
+ assert.deepEqual(after.gitPolicy.commits[0].paths,[]);
+ assert.equal(after.gitPolicy.expectedHead,h.deps.branchState().head);
 });
 test('explicit implementation intent displays, journals and starts the unchanged proposal immediately',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);
@@ -484,6 +501,7 @@ test('legacy commit resume without a review fingerprint returns through review b
  const h=harness();let commitAttempts=0;
  h.entries.push({type:'custom',customType:'delivery-mode-v1',data:{version:1,enabled:true,stage:'commit',task:0,round:0,plan,routes,snapshot:'hash',active:null,reports:[],reason:'',workspace:'/repo',owner:'session',gitPolicy:{changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/fixture',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]}}});
  h.deps.commitApprovedTask=()=>{commitAttempts++;assert.ok(h.controller.state().reports.some(r=>r.stage==='quality'));return {hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:'hash'};};
+ h.deps.assertApprovedPaths=()=>['a'];
  await h.events.session_start({},h.ctx);await h.commands.delivery.handler('resume',h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'complete');assert.equal(commitAttempts,1);assert.equal(h.controller.state().reports.filter(r=>r.stage==='quality').length,1);
 });
@@ -1100,8 +1118,27 @@ test('legacy pre-authorization commit failure reuses only unchanged accepted evi
  const pendingCommit={phase:'preparation',task:0,round:2,snapshot:'hash',reviewedContentSnapshot:'hash',files:['a']};
  const h=harness();h.entries.push(oldRunEntry('blocked',routes,{gitPolicy,reviewedContentSnapshot:{task:0,aggregate:false,snapshot:'hash'},pendingCommit,reason:'Commit failed before staging'}));
  let commits=0;h.deps.commitApprovedTask=()=>{commits++;return {hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:'hash'};};
+ h.deps.assertApprovedPaths=()=>['a'];
  await h.events.session_start({},h.ctx);const result=await h.tools.delivery_resume.execute('resume',{},null,null,h.ctx);await h.controller.settled();
  assert.match(result.content[0].text,/unchanged accepted review evidence/);assert.equal(commits,1);assert.equal(h.controller.state().pendingCommit,undefined);assert.equal(h.calls.filter(call=>call.params?.agent==='delivery-coder').length,0);
+});
+test('dirty worktree with unchanged pending commit points to delivery_resume instead of the generic dirty error',async()=>{
+ const dirtyError='Delivery requires a clean tracked and untracked worktree before proposal. Reviewed dirty work must use an explicitly authorized correctionAdoption plan; ordinary plans still require commit or stash. No automatic stash or baseline commit was created.';
+ const gitPolicy={changeType:'feature',reviewPolicy:'balanced',baseBranch:'main',defaultBranch:'main',workingBranch:'feature/fixture',baseHead:'hash',expectedHead:'hash',createBranch:false,branchCreated:true,commits:[]};
+ const pendingCommit={phase:'preparation',task:0,round:2,snapshot:'hash',reviewedContentSnapshot:'hash',files:['a']};
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{gitPolicy,reviewedContentSnapshot:{task:0,aggregate:false,snapshot:'hash'},pendingCommit,reason:'Commit failed before staging'}));
+ h.deps.lifecyclePreflight=()=>{throw new Error(dirtyError);};
+ await h.events.session_start({},h.ctx);
+ // Workspace unchanged since the blocked commit: the pending-commit recovery message must replace the generic dirty-worktree error.
+ await assert.rejects(h.tools.delivery_plan.execute('plan',plan,null,null,h.ctx),/pending for task 1[\s\S]*delivery_resume[\s\S]*commit[\s\/]stash/);
+ assert.deepEqual(h.controller.state().pendingCommit,pendingCommit);
+ // Workspace changed since the blocked commit: the original dirty-worktree error is rethrown.
+ const changed=harness();changed.entries.push(oldRunEntry('blocked',routes,{gitPolicy,reviewedContentSnapshot:{task:0,aggregate:false,snapshot:'hash'},pendingCommit,reason:'Commit failed before staging'}));
+ changed.deps.lifecyclePreflight=()=>{throw new Error(dirtyError);};
+ changed.deps.fingerprint=()=> 'changed-hash';
+ await changed.events.session_start({},changed.ctx);
+ await assert.rejects(changed.tools.delivery_plan.execute('plan',plan,null,null,changed.ctx),new RegExp(dirtyError.replaceAll(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+ assert.deepEqual(changed.controller.state().pendingCommit,pendingCommit);
 });
 test('legacy recovery review lineage is reconstructed only from matching same-session repository journal evidence',async()=>{
  const retained=oldRunEntry('blocked',routes,{reason:'Child review-failed failed; attempt closed. infrastructure failed',correctionPolicy:{maxFixRounds:4,source:'default'},failedRun:{id:'review-failed',state:'failed',stage:'quality',task:0,round:2,model:routes.quality,error:'infrastructure failed'}});

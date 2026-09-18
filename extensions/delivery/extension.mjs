@@ -852,14 +852,36 @@ export function registerDelivery(pi,schemas,deps={}) {
     if(resume && pending.reviewedContentSnapshot!==reviewedContentSnapshot) {
       const error=new Error('Retained commit lacks the exact accepted review content fingerprint; returning through checks and reviews.');error.reviewSnapshotMissing=true;throw error;
     }
+    const adoptCommit=(record,summary)=>{
+      lifecycle.expectedHead=record.hash;
+      lifecycle.commits.push({task:s.task,title,changeType,hash:record.hash,message:record.message,snapshot:before,reviewedContentSnapshot,paths:record.paths,aggregateCorrection:correction});
+      s.gitPolicy=lifecycle;
+      if(s.finalChecksProof && s.finalChecksProof.snapshot===before)s.finalChecksProof.commitHead=record.hash;
+      s.snapshot=snapshot();
+      s=advance(s,{committed:true,status:'approved',summary,findings:[]},s.snapshot);
+      s.reports.at(-1).commit=record;save();
+    };
+    // A verification-only task may leave the approved scope unchanged (already
+    // committed by an earlier attempt). Git cannot create an empty commit, so
+    // the lifecycle advances cleanly at the current HEAD instead of blocking.
+    let changedPaths;
+    try {changedPaths=d.assertApprovedPaths(root,files,{allowStaged:resume});}
+    catch(error) {
+      if(resume) {error.commitAuthorizationInvalid=true;error.message='Approved staged content changed after commit failure; commit resume authority was invalidated. Re-run checks and reviews.';}
+      throw error;
+    }
+    if(changedPaths.length===0) {
+      const state=d.branchState(root);
+      if(state.branch===lifecycle.workingBranch && state.head===lifecycle.expectedHead) {
+        const message=d.commitPlanMessage(changeType,title);
+        if(resume)delete s.pendingCommit;
+        adoptCommit({hash:state.head,message,branch:state.branch,baseHead:lifecycle.baseHead,paths:[],snapshot:reviewedContentSnapshot},`Committed task ${s.task+1}: ${message} (no changed paths; already committed)`);
+        return;
+      }
+    }
     d.beforeCommit?.({task:s.task,aggregate:correction,snapshot:reviewedContentSnapshot});
     const record=d.commitApprovedTask(root,{changeType,title,files,expectedHead:lifecycle.expectedHead,snapshot:reviewedContentSnapshot,scope:files,allowStaged:resume,expectedAuthorization:resume?pending?.authorization:undefined});
-    lifecycle.expectedHead=record.hash;lifecycle.commits.push({task:s.task,title,changeType,hash:record.hash,message:record.message,snapshot:before,reviewedContentSnapshot,paths:record.paths,aggregateCorrection:correction});
-    s.gitPolicy=lifecycle;
-    if(s.finalChecksProof && s.finalChecksProof.snapshot===before)s.finalChecksProof.commitHead=record.hash;
-    s.snapshot=snapshot();
-    s=advance(s,{committed:true,status:'approved',summary:`Committed task ${s.task+1}: ${record.message}`,findings:[]},s.snapshot);
-    s.reports.at(-1).commit=record;save();
+    adoptCommit(record,`Committed task ${s.task+1}: ${record.message}`);
   }
   async function pump() {
     try {
@@ -1043,7 +1065,16 @@ export function registerDelivery(pi,schemas,deps={}) {
           if(!gitPolicy)gitPolicy={changeType:plan.changeType,reviewPolicy:plan.reviewPolicy || 'balanced',baseBranch:candidate.branch,defaultBranch:candidate.defaultBranch,workingBranch:createBranch?d.firstFreeBranch(root,naming):candidate.branch,baseHead:candidate.head,expectedHead:candidate.head,createBranch,branchCreated:false,commits:[]};
           adoptionRecord={version:1,kind:'retained-candidate',session:ctx.sessionManager.getSessionId(),repository:root,userTurn:requestText,candidate,reviewScope:source.scope,correctionScope:normalizedFiles(plan.tasks[0].files),findingsReport:structuredClone(source.findingsReport),sourceState:structuredClone(s)};
         } else {
-          const state=d.lifecyclePreflight(root);
+          let state;
+          try {state=d.lifecyclePreflight(root);}
+          catch(error) {
+            const pending=s.pendingCommit;
+            if(!/worktree/i.test(error?.message || '') || !pending)throw error;
+            let unchanged=false;
+            try {unchanged=snapshot()===pending.snapshot;} catch {unchanged=false;}
+            if(!unchanged)throw error;
+            throw new Error(`A previous delivery commit is still pending for task ${pending.task+1} and the worktree still holds its unchanged changes. Run delivery_resume to retry the pending commit, or commit/stash those changes manually before creating a new delivery plan.`);
+          }
           const naming=d.branchPlan(plan.title,plan.changeType),createBranch=state.branch===state.defaultBranch;
           gitPolicy={changeType:plan.changeType,reviewPolicy:plan.reviewPolicy || 'balanced',baseBranch:state.branch,defaultBranch:state.defaultBranch,workingBranch:createBranch?d.firstFreeBranch(root,naming):state.branch,baseHead:state.head,expectedHead:state.head,createBranch,branchCreated:false,commits:[]};
         }
