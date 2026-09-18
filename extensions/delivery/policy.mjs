@@ -128,6 +128,28 @@ export function timeoutPolicy(input={}) {
   for(const [key,value] of Object.entries(p))check(Number.isSafeInteger(value) && value>=(key==='continuationMs'?0:60000) && value<=2*60*60000,`Invalid timeout setting: ${key}`);
   return p;
 }
+export function executionProfile(value='default') {
+  check(value==='default' || value==='dev', 'Invalid execution profile');
+  return value;
+}
+export function profileDefaults(profile='default') {
+  executionProfile(profile);
+  if(profile==='dev') return {timeouts:{coderMs:10*60000,continuationMs:5*60000,reviewMs:5*60000,commandMs:60000,idleWarningMs:120000,deadlineWarningMs:120000},corrections:{maxFixRounds:1},optimizer:false,aggregateSecurity:false};
+  return {timeouts:{},corrections:{},optimizer:true,aggregateSecurity:true};
+}
+export function recommendExecution(plan) {
+  check(plan && typeof plan==='object','Execution recommendation needs a plan');
+  const tasks=Array.isArray(plan.tasks)?plan.tasks:[],files=new Set(tasks.flatMap(task=>task.files || [])),checks=tasks.reduce((n,task)=>n+(task.checks?.length || 0),0)+(plan.checks?.length || 0);
+  const sensitive=plan.security===true || plan.risk==='high' || tasks.some(task=>task.sensitive===true);
+  const reasons=[];
+  if(sensitive) reasons.push('security-sensitive or high-risk work');
+  if(tasks.length>2) reasons.push(`${tasks.length} implementation tasks`);
+  if(files.size>12) reasons.push(`${files.size} files in scope`);
+  if(checks>6) reasons.push(`${checks} verification commands`);
+  const full=sensitive || tasks.length>2 || files.size>12 || checks>6;
+  const split=tasks.length===1 && (files.size>8 || (tasks[0]?.instructions?.length || 0)>4500);
+  return {profile:full?'default':'dev',label:full?'FULL':'FAST / DEV',split,reasons:reasons.length?reasons:['bounded low-risk change'],files:files.size,tasks:tasks.length,checks};
+}
 export function attemptBudget(policy,stage,spentMs=0,continuation=false) {
   check(Number.isFinite(spentMs) && spentMs>=0,'Invalid recorded coding time');
   if(stage!=='coder')return policy.reviewMs;
@@ -173,6 +195,7 @@ function cumulativeFeedback(previous, report) {
   return [...lines,entry].slice(-6).join('\n\n').slice(-12000);
 }
 function lifecycleReviewPolicy(state) { return state?.gitPolicy?.reviewPolicy || null; }
+function aggregateNeedsSecurity(state) { return state.plan?.aggregateSecurity!==false || lifecycleReviewPolicy(state)==='strict' || state.plan?.security===true || state.plan?.tasks?.some(task=>task.sensitive===true); }
 function taskNeedsSecurity(state) {
   const policy=lifecycleReviewPolicy(state);
   if(!policy) return Boolean(state.plan?.security || state.gitPolicy);
@@ -241,7 +264,7 @@ export function advance(state, report, snapshot) {
   if(s.stage==='coder') s.stage='checks';
   else if(s.stage==='checks' && s.aggregateCorrection) s.stage='final-checks';
   else if(s.stage==='checks' && s.optimizerBypass) s.stage=reviewEntry(s);
-  else if(s.stage==='checks' && lifecycleReviewPolicy(s)) s.stage='optimizer';
+  else if(s.stage==='checks' && lifecycleReviewPolicy(s) && s.plan?.optimizer!==false) s.stage='optimizer';
   else if(s.stage==='checks') s.stage='spec';
   else if(s.stage==='optimizer') {
     s.optimizerPasses[s.task]={ran:true,changed:report.optimizerChanged===true, beforeSnapshot:report.optimizerBeforeSnapshot, afterSnapshot:report.optimizerAfterSnapshot, checks:report.optimizerChanged===true?'rerun':'reused'};
@@ -256,7 +279,7 @@ export function advance(state, report, snapshot) {
   else if(s.stage==='security' && s.task+1 < s.plan.tasks.length) { s.task++; s.stage=s.plan.mode==='review'?'spec':'coder'; s.round=0; s.feedback=''; s.optimizerBypass=false; }
   else if(s.stage==='security') s.stage='verification';
   else if(s.stage==='final-checks') s.stage=s.gitPolicy?'aggregate-quality':'verification';
-  else if(s.stage==='aggregate-quality') s.stage='aggregate-security';
+  else if(s.stage==='aggregate-quality') s.stage=aggregateNeedsSecurity(s)?'aggregate-security':(s.aggregateCorrection?'commit':'verification');
   else if(s.stage==='aggregate-security') s.stage=s.aggregateCorrection?'commit':'verification';
   else if(s.stage==='quality' && s.task+1 >= s.plan.tasks.length) s.stage='verification';
   else s.stage='verification';

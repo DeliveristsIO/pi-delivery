@@ -14,6 +14,7 @@ export function loadConfig(path=configPath()) {
   if(!existsSync(path)) return {version:1,routes:{},repos:[]};
   const c=jsonFile(path,65536);
   if(c.version!==1 || !c.routes || !Array.isArray(c.repos) || !c.repos.every(p=>typeof p==='string')) throw new Error('Invalid delivery configuration');
+  if(c.profile!==undefined && c.profile!=='default' && c.profile!=='dev') throw new Error('Invalid delivery execution profile');
   return c;
 }
 export function saveConfig(path,c) {

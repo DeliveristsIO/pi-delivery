@@ -19,6 +19,14 @@ Optional timeout values, in milliseconds:
 }
 ```
 
+For small, low-risk changes, select the development profile:
+
+```json
+{ "profile": "dev" }
+```
+
+`dev` uses a 10-minute coder budget, a 5-minute continuation/reviewer budget, 1-minute commands, one correction round and no optimizer pass. The planner still shows a recommendation before execution; use `executionProfile: "default"` on a proposal when the full flow is appropriate. High-risk, sensitive, multi-task or broad plans are recommended for the full profile. Profiles are bound to new plans, so changing configuration does not alter retained work.
+
 This is a timeout fragment, not a complete configuration. Each value must be a whole millisecond count between one minute and two hours; `continuationMs: 0` disables continuation. `commandMs` bounds each host verification command (default two minutes); a command that exceeds it terminates and fails its check. Coder attempts and review fixes share the cumulative per-task allowance. Route/budget changes require reapproval where they affect retained execution bindings.
 
 Task commands belong in `tasks[].checks`; whole-change release gates belong in top-level `checks`. Multi-task implementation plans require per-task checks. Commands run with the user's permissions; executable/syntax validation is not a shell sandbox.

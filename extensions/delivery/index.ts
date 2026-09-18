@@ -5,7 +5,7 @@ import { registerDelivery } from './extension.mjs';
 export default function (pi: ExtensionAPI) {
   registerDelivery(pi, {
     empty: Type.Object({}),
-    configure: Type.Object({routes: Type.Optional(Type.Object(
+    configure: Type.Object({profile: Type.Optional(Type.String({enum:['default','dev'],description:'Execution profile for newly proposed runs. dev shortens budgets and removes the optimizer pass.'})),routes: Type.Optional(Type.Object(
       Object.fromEntries(['planning','coder','spec','quality','security'].map(role=>[role,Type.Optional(Type.String({maxLength:256,description:'Exact provider/model ID explicitly chosen by the user.'}))])),
       {additionalProperties:false,description:'Omit to inspect configured routes and available models. Changes show a confirmation and preserve retained work.'}
     )),fallbacks: Type.Optional(Type.Object(
@@ -20,6 +20,7 @@ export default function (pi: ExtensionAPI) {
       mode: Type.String({enum:['implementation','review'],description:'Infer from request and conversation: requested review runs read-only; explicit implementation intent starts the displayed unchanged proposal, while planning-only or ambiguous intent does not.'}),
       changeType: Type.Optional(Type.String({enum:['feature','bug','chore'],description:'Required for fresh implementation plans; omitted for review-plan schema compatibility.'})),
       reviewPolicy: Type.Optional(Type.String({enum:['balanced','strict'],description:'Implementation review lifecycle: balanced (default) combines specification and quality review; strict opts into separate reviews.'})),
+      executionProfile: Type.Optional(Type.String({enum:['dev','default'],description:'Override the configured profile for this proposal. dev is recommended for small low-risk changes; default is the full delivery flow.'})),
       start: Type.Optional(Type.Boolean({description:'Set false only when the user requested planning without execution. It always prevents launch.'})),
       executionIntent: Type.Optional(Type.Object({
         kind: Type.Literal('explicit-implementation'),

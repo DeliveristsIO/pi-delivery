@@ -1,7 +1,7 @@
 import {join} from 'node:path';
 import {accessSync,constants} from 'node:fs';
 import {randomUUID} from 'node:crypto';
-import {ROLES,ASTRA,AGENTS,REPORT_SCHEMA,catalog,validateRoutes,validateFallbacks,validatePlan,initialState,approve,advance,parentToolAllowed,timeoutPolicy,attemptBudget,allChecks,checksForTask,repairCheckScopes,correctionPolicy,fixRoundLimit,validateSupervisorReply,createExecutionAuthority,executionAuthorityMatches} from './policy.mjs';
+import {ROLES,ASTRA,AGENTS,REPORT_SCHEMA,catalog,validateRoutes,validateFallbacks,validatePlan,initialState,approve,advance,parentToolAllowed,timeoutPolicy,attemptBudget,allChecks,checksForTask,repairCheckScopes,correctionPolicy,fixRoundLimit,validateSupervisorReply,createExecutionAuthority,executionAuthorityMatches,executionProfile,profileDefaults,recommendExecution} from './policy.mjs';
 import * as io from './io.mjs';
 import {rpc} from './rpc.mjs';
 import {ROLE_HELP,modelLabel} from './setup.mjs';
@@ -19,6 +19,10 @@ export function registerDelivery(pi,schemas,deps={}) {
   for(const [k,v] of Object.entries({...io,rpc,pollMs:1500,retryDelayMs:5000,now:Date.now})) if(!(k in deps)) deps[k]=v;
   const d=deps;
   let s=initialState(),ctx,root,config,originalTools,job=null,closed=false,checking,requestText='',requestTurn=null,approvalTurn=null,fileIntent=null;
+  function readConfig() {
+    const raw=d.loadConfig(d.configPath()),profile=executionProfile(raw.profile || 'default'),defaults=profileDefaults(profile);
+    return {...raw,profile,timeouts:{...defaults.timeouts,...(raw.timeouts || {})},corrections:{...defaults.corrections,...(raw.corrections || {})},optimizer:raw.optimizer===undefined?defaults.optimizer:raw.optimizer};
+  }
   function snapshot(plan=s.plan,warnings=[]) {
     if(plan?.sourcePlan && d.readPlan(root,plan.sourcePlan.path).hash!==plan.sourcePlan.hash)throw new Error('Source plan changed; read the updated document and obtain fresh execution approval.');
     return d.fingerprint(root,{scope:plan?.tasks.flatMap(t=>t.files) || [],commands:allChecks(plan),warnings});
@@ -30,11 +34,15 @@ export function registerDelivery(pi,schemas,deps={}) {
   const authorityBinding=(overrides={})=>({turn:requestTurn,userTurn:requestText,session:ctx.sessionManager.getSessionId(),repository:root,plan:s.plan,workspace:s.snapshot,routes:s.routes,fallbacks:s.fallbacks,timeouts:s.timeouts,corrections:s.correctionPolicy,gitPolicy:s.gitPolicy,adoption:s.correctionAdoption || null,...overrides});
   function readablePlan(routes) {
     const p=s.plan;
+    const recommendation=recommendExecution(p);
     return [p.title,`Workspace: ${root}`,`Mode: ${p.mode==='review'?'Read-only review — no fixes':'Implementation'}`,p.changeType?`Change type: ${p.changeType} (branch ${p.changeType}/<safe-title-slug>, commits ${p.changeType==='feature'?'feat':p.changeType}:)`:'',s.gitPolicy?`Git lifecycle: base ${s.gitPolicy.baseBranch || 'pending'}, working branch ${s.gitPolicy.workingBranch || 'pending'}, base HEAD ${s.gitPolicy.baseHead || 'pending'}`:'',
       p.reviewRange?`Commits: ${p.reviewRange.base.slice(0,10)}..${p.reviewRange.head.slice(0,10)}`:'',
       p.sourcePlan?`Source plan: ${p.sourcePlan.path}`:'',
       ...(s.coverageWarnings || []).map(w=>`Coverage warning: ${w}`),
-      `Review policy: ${s.gitPolicy?.reviewPolicy || p.reviewPolicy || 'legacy'}${p.mode==='implementation' && (s.gitPolicy?.reviewPolicy || p.reviewPolicy) ? ' · balanced=optimizer then combined spec+quality; strict=separate spec/quality/security' : ''}`,
+      `Flow recommendation: ${recommendation.label} — ${recommendation.reasons.join(', ')}`,
+      recommendation.split?'Scope suggestion: split this broad task into smaller independently testable tasks.':'Scope suggestion: keep the current task boundaries; the proposed scope is bounded.',
+      `Selected execution profile: ${p.executionProfile || 'default'}${p.optimizer===false?' · optimizer disabled':''}`,
+      `Review policy: ${s.gitPolicy?.reviewPolicy || p.reviewPolicy || 'legacy'}${p.mode==='implementation' && (s.gitPolicy?.reviewPolicy || p.reviewPolicy) ? ' · balanced=combined spec+quality; strict=separate spec/quality/security' : ''}`,
       `Correction budget: up to ${fixRoundLimit(s)} coder rework rounds per task${s.gitPolicy?' plus a separate aggregate integration-review budget of the same size':''} within the existing cumulative coding-time allowance.`,
       Object.values(s.fallbacks || {}).some(list=>list?.length)?`Automatic failover: configured ordered fallback models are used only after recognized transport failures; each preserves the approved scope and remaining budget.`:'',
       'Tasks',...p.tasks.map((t,i)=>`${i+1}. ${t.title}\n   ${t.instructions}\n   Files: ${t.files.join(', ')}\n   Sensitive: ${t.sensitive===true?'yes':'no'}\n   Acceptance: ${t.acceptance.join('; ')}\n   Task checks: ${(t.checks || (p.tasks.length===1?p.checks:[])).join('; ')}`),
@@ -348,7 +356,7 @@ export function registerDelivery(pi,schemas,deps={}) {
     save();
   }
   function guardIdle() {if(job || s.active || s.pendingRetry) throw new OwnedRunBusy('An owned run is active or unresolved; no plan or configuration was changed. '+nextAction().message);}
-  function refreshConfig() {config=d.loadConfig(d.configPath());}
+  function refreshConfig() {config=readConfig();}
   function configuredFallbacks(routes) {return validateFallbacks(config.fallbacks || {},routes,available());}
   function configuredProviderGroups(source=config) {
     const mainRoutes=validateRoutes(source.routes,available());
@@ -633,7 +641,7 @@ export function registerDelivery(pi,schemas,deps={}) {
     if(taskChecks===undefined && s.stage==='planning' && !s.plan && !s.active && !s.pendingContinuation && !s.pendingRetry && !s.resumeStage) {
       return 'No delivery task has started in this session. Describe your task normally. Reviews run directly; implementation waits for your conversational approval.';
     }
-    config=d.loadConfig(d.configPath());
+    config=readConfig();
     if(reconcileOrphanedRun())return statusText();
     const blockedReport=blockedReviewReport();
     if(taskChecks===undefined && s.pendingCommit) {
@@ -713,7 +721,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       const preview=[`Native preflight rejected ${stage} before launching a child. Retry with ${routes[stage]} using an explicit read-only prompt.`,...changes,'Selected providers receive task context and prior evidence. No write tools, coder replay, retry reset or skipped reviews. Existing checks, findings and coding spend are retained.'].join('\n');
       if(!ctx.hasUI || !await ctx.ui.confirm('Retry the rejected read-only review?',preview))throw new Error('Read-only review retry was not approved');
       if(closed || JSON.stringify(s)!==identity)throw new Error('Delivery state changed during review recovery');
-      config=d.loadConfig(d.configPath());
+      config=readConfig();
       if(JSON.stringify(validateRoutes(config.routes,available()))!==JSON.stringify(routes) || JSON.stringify(timeoutPolicy(config.timeouts))!==JSON.stringify(limits))throw new Error('Recovery configuration changed during approval');
       if(snapshot()!==s.snapshot)throw new Error('Workspace changed during review recovery');
       s.routes=routes;s.timeouts=limits;s.active=null;s.stage=stage;s.reason='';save();start();return;
@@ -747,7 +755,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       const preview=['Correct verification ordering; preserve task scope, coder work, evidence and time spent.',...changes,'Selected providers receive the approved task context and prior execution evidence.',...recovered.plan.tasks.map((t,i)=>`Task ${i+1}: ${t.checks.join('; ')}`),'Final release checks remain mandatory:',...recovered.plan.checks,`Restore ${recovered.checkScopeRecovery.creditedRounds} rounds consumed by premature release checks; retain all other retry history.`].join('\n');
       if(!ctx.hasUI || !await ctx.ui.confirm(changes.length?'Approve check ordering and route/budget changes?':'Correct legacy check ordering and continue reviews?',preview))throw new Error('Check ordering correction was not approved; existing work preserved');
       if(closed || JSON.stringify(s)!==identity)throw new Error('Delivery state changed during check-scope approval');
-      config=d.loadConfig(d.configPath());
+      config=readConfig();
       if(JSON.stringify(validateRoutes(config.routes,available()))!==JSON.stringify(routes) || JSON.stringify(timeoutPolicy(config.timeouts))!==JSON.stringify(limits))throw new Error('Recovery configuration changed during approval; no execution resumed');
       if(snapshot(recovered.plan)!==baseline)throw new Error('Workspace changed during check-scope approval');
       s=recovered;save();display(s.pendingContinuation?'Check ordering corrected; continue the retained timeout recovery. Final release checks retained.':'Check ordering corrected. Re-running current task checks, then independent reviews. No coder replay; final release checks retained.');start();return;
@@ -768,7 +776,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       ].join('\n');
       if(!ctx.hasUI || !await ctx.ui.confirm('Approve correction-bound extension?',preview))throw new Error('Correction extension was not approved; exhausted state preserved');
       if(closed || JSON.stringify(s)!==identity)throw new Error('Delivery state changed during correction extension approval');
-      config=d.loadConfig(d.configPath());
+      config=readConfig();
       if(JSON.stringify({routes:config.routes,timeouts:config.timeouts,corrections:config.corrections})!==configuration)throw new Error('Correction extension configuration changed during approval');
       if(!correctionExtensionAvailable() || snapshot()!==baseline)throw new Error('Workspace or correction state changed during approval');
       s.correctionPolicy={...configured,source:'confirmed-extension'};
@@ -1040,6 +1048,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       if(modelId(ctx.model)!==config.routes.planning) throw new Error('Wrong planning model; activate /delivery again');
       const plan=validatePlan(params),intent=params.executionIntent,attachmentIntent=params.reviewAttachment,adoptionIntent=params.correctionAdoption;
       delete plan.executionIntent;delete plan.reviewAttachment;delete plan.correctionAdoption;delete plan.start;
+      if(plan.mode!=='review') { const profile=executionProfile(plan.executionProfile || config.profile); const defaults=profileDefaults(profile); plan.executionProfile=profile; plan.optimizer=defaults.optimizer; plan.aggregateSecurity=defaults.aggregateSecurity; }
       let gitPolicy=null,adoptionRecord=null,timeouts=timeoutPolicy(config.timeouts),corrections=correctionPolicy(config.corrections);
       if(plan.mode!=='review') {
         if(!plan.changeType)throw new Error('Implementation plans require changeType: feature, bug, or chore.');
@@ -1153,25 +1162,28 @@ export function registerDelivery(pi,schemas,deps={}) {
     await launchApproved();return result('Execution started. Use delivery_status for actual progress.');
   }});
   pi.registerTool({name:'delivery_resume',label:'Continue approved delivery',description:'Continue an already approved interrupted task within its existing scope; route/budget changes require explicit confirmation. When a configured correction bound is higher than a retained exhausted bound and cumulative coding time remains, delivery_resume can adopt it once after compact confirmation without a replacement plan. Final exhaustion returns inspect guidance and does not generate another plan automatically. Confirmed coding timeouts allow one bounded same-model continuation after runner closure. Legacy budget changes require user confirmation. For legacy multi-task check-order failures, provide taskChecks derived from the approved source plan; one confirmation covers check ordering plus any configured route/budget changes. Final checks and completed coder evidence are preserved. An exact known read-only preflight non-launch can be retried after confirmation without coder replay. Closed failed children are reconciled without restarting execution; their evidence and coding spend are retained. Closed transport failures retry twice on the same route, then use configured ordered fallbacks within the remaining budget; other failures are not auto-retried.',parameters:schemas.resume || schemas.empty,async execute(_id,params,_signal,_update,c){ctx=c;if(!s.enabled)throw new Error('Activate delivery first');const message=await resumeOwned(params.taskChecks);return result(message || 'Recovery started. Use delivery_status for actual progress.');}});
-  pi.registerTool({name:'delivery_status',label:'Delivery status',description:'Read actual delivery state, reviewPolicy, next action, configured versus bound routes and native worker evidence. Activity and transcript paths are not proof checks passed.',parameters:schemas.empty,async execute(){refreshConfig();return result(statusText(),{...structuredClone(s),reviewPolicy:s.gitPolicy?.reviewPolicy || s.plan?.reviewPolicy || null,nextAction:nextAction(),configuredRoutes:structuredClone(config.routes),configuredFallbacks:structuredClone(config.fallbacks || {})});}});
+  pi.registerTool({name:'delivery_status',label:'Delivery status',description:'Read actual delivery state, reviewPolicy, next action, configured versus bound routes and native worker evidence. Activity and transcript paths are not proof checks passed.',parameters:schemas.empty,async execute(){refreshConfig();return result(statusText(),{...structuredClone(s),reviewPolicy:s.gitPolicy?.reviewPolicy || s.plan?.reviewPolicy || null,executionProfile:config.profile,nextAction:nextAction(),configuredRoutes:structuredClone(config.routes),configuredFallbacks:structuredClone(config.fallbacks || {})});}});
   pi.registerTool({name:'delivery_configure',label:'Delivery model routes',description:'Inspect configured routes and available exact model IDs without running setup. Supply only routes the user explicitly wants changed. Shows a confirmation before saving; unchanged routes do not prompt. Preserves retained work. A pending plan is redisplayed on the new routes and needs fresh execution approval. Running or unresolved execution cannot be reconfigured.',parameters:schemas.configure || schemas.empty,async execute(_id,params={},_signal,_update,c){
     ctx=c;if(!root)root=d.repoRoot(ctx.cwd);refreshConfig();
-    if(params.routes===undefined && params.fallbacks===undefined)return result(JSON.stringify({configuredRoutes:config.routes,configuredFallbacks:config.fallbacks || {},availableModels:available(),nextAction:nextAction()},null,2));
+    if(params.profile===undefined && params.routes===undefined && params.fallbacks===undefined)return result(JSON.stringify({executionProfile:config.profile,configuredRoutes:config.routes,configuredFallbacks:config.fallbacks || {},availableModels:available(),nextAction:nextAction()},null,2));
+    if(params.profile!==undefined)executionProfile(params.profile);
     if(params.routes!==undefined && (!params.routes || typeof params.routes!=='object' || Array.isArray(params.routes) || Object.keys(params.routes).some(r=>!ROLES.includes(r))))throw new Error('Supply only named delivery model routes.');
     if(params.fallbacks!==undefined && (!params.fallbacks || typeof params.fallbacks!=='object' || Array.isArray(params.fallbacks) || Object.keys(params.fallbacks).some(r=>!ROLES.includes(r))))throw new Error('Supply only named fallback routes.');
     const routes=validateRoutes({...config.routes,...(params.routes || {})},available());
     const fallbacks=validateFallbacks({...config.fallbacks,...(params.fallbacks || {})},routes,available());
-    if(JSON.stringify(routes)===JSON.stringify(config.routes) && JSON.stringify(fallbacks)===JSON.stringify(validateFallbacks(config.fallbacks || {},routes,available())))return result('Requested routes are already configured. No setup or confirmation needed. '+nextAction().message);
+    const profile=params.profile ?? config.profile;
+    if(profile===config.profile && JSON.stringify(routes)===JSON.stringify(config.routes) && JSON.stringify(fallbacks)===JSON.stringify(validateFallbacks(config.fallbacks || {},routes,available())))return result('Requested routes are already configured. No setup or confirmation needed. '+nextAction().message);
     guardConfiguration();
     const baseline=JSON.stringify(config),identity=JSON.stringify(s);
     const changes=ROLES.filter(r=>routes[r]!==config.routes[r]).map(r=>`${r}: ${config.routes[r] || 'unset'} → ${routes[r]}`);
     const fallbackChanges=ROLES.filter(r=>JSON.stringify(fallbacks[r])!==JSON.stringify((config.fallbacks || {})[r] || [])).map(r=>`${r} fallbacks: ${(config.fallbacks?.[r] || []).join(', ') || 'none'} → ${fallbacks[r].join(', ') || 'none'}`);
-    if(!ctx.hasUI || !await ctx.ui.confirm('Change delivery model routes?', [...changes,...fallbackChanges,'Selected providers receive project context. Retained work and evidence are preserved. This does not start execution.'].join('\n')))return result('Routes unchanged; route change was not confirmed.');
+    const profileChange=profile!==config.profile?`execution profile: ${config.profile} → ${profile}`:'';
+    if(!ctx.hasUI || !await ctx.ui.confirm('Change delivery configuration?', [profileChange,...changes,...fallbackChanges,'Selected providers receive project context. Retained work and evidence are preserved. This does not start execution.'].filter(Boolean).join('\n')))return result('Delivery configuration unchanged; no change was confirmed.');
     refreshConfig();
     if(closed || JSON.stringify(config)!==baseline || JSON.stringify(s)!==identity)throw new Error('Delivery state or configuration changed during confirmation; no routes saved.');
     validateRoutes(routes,available());
-    await saveConfiguration({...config,routes,fallbacks});
-    return result('Routes saved; retained work preserved. '+nextAction().message);
+    await saveConfiguration({...config,profile,routes,fallbacks});
+    return result('Delivery configuration saved; retained work preserved. New proposals will use the selected profile. '+nextAction().message);
   }});
   pi.registerTool({name:'delivery_steer',label:'Prioritize current verification',description:'Ask the currently running owned coder to prioritize its approved task checks and targeted fixes. Uses a fixed in-scope message; cannot change scope, model, tools, budget, or worker. Acceptance by the runner does not prove delivery to the worker.',parameters:schemas.empty,async execute(_id,_params,_signal,_update,c){
     ctx=c;
@@ -1191,7 +1203,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       ctx=c;
       try {
         if(!root) root=d.repoRoot(ctx.cwd);
-        config=d.loadConfig(d.configPath());
+        config=readConfig();
         const command=args.trim();
         if(command==='status') {display(statusText());return;}
         if(command==='models') {
@@ -1302,7 +1314,7 @@ export function registerDelivery(pi,schemas,deps={}) {
   pi.on('session_start',async(_e,c)=>{
     ctx=c;closed=false;
     try {
-      root=d.repoRoot(ctx.cwd);config=d.loadConfig(d.configPath());
+      root=d.repoRoot(ctx.cwd);config=readConfig();
       const entries=ctx.sessionManager.getBranch();
       const saved=entries.filter(e=>e.type==='custom'&&e.customType===ENTRY).at(-1)?.data;
       if(saved?.workspace===root && saved.owner===ctx.sessionManager.getSessionId())s=structuredClone(saved);
@@ -1340,7 +1352,7 @@ export function registerDelivery(pi,schemas,deps={}) {
       approvalTurn=s.stage==='awaiting-approval' && requestText.trim()?{key:planKey(),text:requestText}:null;
     }
     if(!s.enabled && /^\/skill:orchestrate-delivery(?:\s|$)/.test(e.text || '')) {
-      try {root=d.repoRoot(ctx.cwd);config=d.loadConfig(d.configPath());await activate();}
+      try {root=d.repoRoot(ctx.cwd);config=readConfig();await activate();}
       catch(error){display(`Delivery activation failed: ${error.message}`);return {action:'handled'};}
     }
     if(!s.enabled)return;

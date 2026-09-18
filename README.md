@@ -62,7 +62,7 @@ Use `/delivery provider` to switch between the configured `main` and `fallback` 
 
 Describe the task normally, or start with `/delivery Add …`. You approve the scope, workspace and checks before anything runs.
 
-Each new implementation task binds `reviewPolicy: balanced` by default (use `strict` for separate gates). Balanced runs one coder, focused checks, one fresh bounded optimizer, affected checks only when the optimizer changed source, then one combined spec+quality review; security runs only for explicitly sensitive tasks. Strict runs the optimizer and then separate spec, quality and security reviews. Approved tasks are committed before the next task; bounded corrections restart review without a second optimizer.
+Each new implementation task binds `reviewPolicy: balanced` by default (use `strict` for separate gates). After planning, Delivery recommends `FAST / DEV` for small low-risk scope and `FULL` for high-risk, sensitive, multi-task or broad scope, with a suggestion to split an oversized task. The recommendation is shown before execution; use `executionProfile: dev|default` in the proposal to choose explicitly. Fast runs shorter bounded budgets, one correction round and no optimizer pass; full runs the complete lifecycle. Balanced runs one coder, focused checks, then one combined spec+quality review; security runs only for explicitly sensitive tasks. Strict runs the optimizer and separate spec, quality and security reviews. Approved tasks are committed before the next task; bounded corrections restart review without a second optimizer.
 
 Release checks run once, after **all** tasks.
 
@@ -94,6 +94,14 @@ During an active owned delivery run, only the exact journaled child/request may 
 An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
 
 Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command (configurable), and 4 correction rounds per new task. Every implementation task requires its own `tasks[].checks`; top-level checks are release gates that run once, after all tasks. See [docs/configuration.md](docs/configuration.md).
+
+The optional execution profile can be selected through `delivery_configure` or per proposal:
+
+```json
+{ "profile": "dev" }
+```
+
+Use `default` for the full delivery flow. The profile applies only to newly proposed implementation runs; retained runs keep their bound policy.
 
 The temporary version-1 correction setting is:
 

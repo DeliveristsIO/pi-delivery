@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, validateFallbacks, correctionPolicy, fixRoundLimit, createExecutionAuthority, executionAuthorityMatches } from '../extensions/delivery/policy.mjs';
+import { catalog, validatePlan, initialState, approve, advance, parentToolAllowed, validateRoutes, validateFallbacks, correctionPolicy, fixRoundLimit, createExecutionAuthority, executionAuthorityMatches, recommendExecution, profileDefaults } from '../extensions/delivery/policy.mjs';
 
 export const routes = { planning: 'openai-codex/gpt-6-astra', coder: 'ollama-cloud/coder', spec: 'anthropic/reviewer', quality: 'anthropic/reviewer', security: 'openai-codex/reviewer' };
 export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: 'Implement fixture', files: ['src/a.js'], checks: ['node --test'], acceptance: ['Works'] }], checks: ['node --test'], risk: 'low', security: true };
+
+test('execution recommendation distinguishes fast dev from full flow and suggests splitting broad work',()=>{
+ assert.equal(profileDefaults('dev').timeouts.coderMs,10*60000);
+ assert.equal(profileDefaults('dev').optimizer,false);
+ assert.equal(recommendExecution({...plan,security:false}).profile,'dev');
+ assert.equal(recommendExecution(plan).profile,'default');
+ assert.equal(recommendExecution({...plan,security:false,tasks:[{...plan.tasks[0],files:Array.from({length:9},(_,i)=>`f${i}`)}]}).split,true);
+});
 
 test('provider neutral catalog distinguishes available from listed; no inference claims', () => {
   const all = [{provider:'anthropic',id:'a'}, {provider:'custom',id:'b'}];
