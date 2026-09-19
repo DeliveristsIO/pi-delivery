@@ -35,6 +35,7 @@ npm_config_ignore_scripts=true pi install npm:pi-subagents@0.67.0
 npm_config_ignore_scripts=true pi install npm:@adityaaria/spark
 npm_config_ignore_scripts=true pi install npm:@sentiolabs/pi-frontend-design
 npm_config_ignore_scripts=true pi install npm:pi-ollama-cloud
+npm_config_ignore_scripts=true pi install npm:pi-browser-control
 
 bash install.sh --check   # verify no conflicts
 bash install.sh           # create links
@@ -58,6 +59,8 @@ Setup is not a recovery step. After initial configuration, ask for a specific mo
 
 Use `/delivery provider` to switch between the configured `main` and `fallback` provider groups without selecting individual models or changing repository activation. Fallbacks are used for recognized rate-limit, quota-exhaustion and transport failures after the primary route's bounded retries.
 
+Switch the default execution profile for new plans in the current repository with `/delivery dev` or `/delivery full`. Profiles are stored per project; these commands do not alter an active or retained run in any project.
+
 ## Use
 
 Describe the task normally, or start with `/delivery Add …`. You approve the scope, workspace and checks before anything runs.
@@ -65,6 +68,8 @@ Describe the task normally, or start with `/delivery Add …`. You approve the s
 Each new implementation task binds `reviewPolicy: balanced` by default (use `strict` for separate gates). After planning, Delivery recommends `FAST / DEV` for small low-risk scope and `FULL` for high-risk, sensitive, multi-task or broad scope, with a suggestion to split an oversized task. The recommendation is shown before execution; use `executionProfile: dev|default` in the proposal to choose explicitly. Fast runs shorter bounded budgets, one correction round and no optimizer pass; full runs the complete lifecycle. Balanced runs one coder, focused checks, then one combined spec+quality review; security runs only for explicitly sensitive tasks. Strict runs the optimizer and separate spec, quality and security reviews. Approved tasks are committed before the next task; bounded corrections restart review without a second optimizer.
 
 Release checks run once, after **all** tasks.
+
+For frontend tasks, mark the affected task with `browser: true`. Delivery then requires an active `pi-browser-control` extension and grants the coder/reviewer browser tools for that task. Browser interaction is bounded verification evidence: agents may open the local app, inspect screenshots/DOM/layout, click/type, read console errors and reload, but browser state never expands source scope or authorizes a commit. Review the third-party package before installing it. [pi-browser-control package details](https://pi.dev/packages/pi-browser-control).
 
 To execute an existing Markdown plan, say:
 
@@ -93,7 +98,7 @@ During an active owned delivery run, only the exact journaled child/request may 
 
 An exact model-exclusion rejection before launch can be reconciled with `delivery_resume`, including after reload. Unknown launch errors remain blocked until investigated. To prioritize checks in a running coder, the assistant can use `delivery_steer`; its fixed message preserves scope, model and deadline. The acknowledgment confirms runner acceptance only, not worker delivery or completed checks.
 
-Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command (configurable), and 4 correction rounds per new task. Every implementation task requires its own `tasks[].checks`; top-level checks are release gates that run once, after all tasks. See [docs/configuration.md](docs/configuration.md).
+Defaults: 45 minutes per coder attempt (plus one 15-minute continuation, capped at 60 cumulative minutes per task), 15 minutes per reviewer, 2 minutes per command (configurable), and 4 correction rounds per new task. If a coder exhausts its allowance, `/delivery resume` can approve one additional bounded recovery attempt on the same task and scope; it never creates a commit, checkout or replacement task automatically. Every implementation task requires its own `tasks[].checks`; top-level checks are release gates that run once, after all tasks. See [docs/configuration.md](docs/configuration.md).
 
 The optional execution profile can be selected through `delivery_configure` or per proposal:
 
@@ -101,7 +106,9 @@ The optional execution profile can be selected through `delivery_configure` or p
 { "profile": "dev" }
 ```
 
-Use `default` for the full delivery flow. The profile applies only to newly proposed implementation runs; retained runs keep their bound policy.
+Use `default` for the full delivery flow. The profile applies only to newly proposed implementation runs in the current project; retained runs keep their bound policy.
+
+Fast/dev and full use adaptive scope by default. If implementation legitimately needs an undeclared file, delivery pauses before checks or commit and exposes the exact discovered files. `delivery_scope` can approve those files after confirmation, or preserve them for a split/new plan. It never deletes or checks out changes automatically. Use `scopePolicy: "strict"` explicitly when undeclared files must always block.
 
 The temporary version-1 correction setting is:
 

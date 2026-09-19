@@ -17,7 +17,7 @@ function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const models=[...new Set(Object.values(routes))].map(s=>{const [provider,...id]=s.split('/');return {provider,id:id.join('/')};});
  const ctx={cwd:'/repo',hasUI:true,mode:'tui',isIdle:()=>true,isProjectTrusted:()=>true,modelRegistry:{getAll:()=>models,getAvailable:()=>models},get model(){return model;},sessionManager:{getSessionId:()=> 'session',getBranch:()=>entries},ui:{setStatus:(k,v)=>statuses.push(v),notify:()=>{},confirm:async()=>true,select:async(t,opts)=>opts[0],input:async()=> 'trial'}};
  const pi={on:(e,h)=>events[e]=h,registerCommand:(n,c)=>commands[n]=c,registerTool:t=>tools[t.name]=t,appendEntry:(customType,data)=>entries.push({type:'custom',customType,data:structuredClone(data)}),setModel:async m=>{model=m;return true;},sendMessage:m=>messages.push(m),sendUserMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','edit','write','delivery_plan'],setActiveTools:()=>{},events:{}};
- const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',fingerprint:()=> 'hash',scopedContentFingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,orphanedRunEvidence:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false,
+ const deps={configPath:()=>'/unused',loadConfig:()=>structuredClone(config),saveConfig:(_,c)=>Object.assign(config,c),repoRoot:()=>'/repo',changedPaths:()=>[],fingerprint:()=> 'hash',scopedContentFingerprint:()=> 'hash',diff:()=> 'diff',reviewPatch:()=>'/fake/full.diff',validateCommands:()=>{},runProgress:()=>null,orphanedRunEvidence:()=>null,verifyCommand:async()=>({code:0,output:'PASS'}),rpc:async(_e,method,params)=>{calls.push({method,params});return method==='spawn'?{details:{runId:'r'+calls.length,asyncDir:'/fake'}}:{};},readOutcome:()=>({status:'approved',summary:'ok',findings:[]}),pollMs:1,retryDelayMs:0,child:false,
    lifecyclePreflight:()=>({branch:'main',defaultBranch:'main',head:'hash',clean:true,status:''}),firstFreeBranch:()=> 'feature/fixture',createDeliveryBranch:()=>({branch:'feature/fixture',defaultBranch:'main',head:'hash',clean:true,status:''}),branchState:()=>({branch:'feature/fixture',head:'hash',defaultBranch:'main',clean:true,status:''}),commitApprovedTask:()=>({hash:'hash',message:'feat: Add',branch:'feature/fixture',baseHead:'hash',paths:['a'],snapshot:'hash'}),assertApprovedPaths:()=>[],clearApprovedStagedPaths:()=>[]};
  if(configuredWorkingTreeEvidence)deps.workingTreeEvidence=configuredWorkingTreeEvidence;
  const controller=registerDelivery(pi,{plan:{},empty:{}},deps);
@@ -54,6 +54,12 @@ test('route inspection and unchanged route requests do not repeat setup or confi
  assert.deepEqual(inspected.configuredRoutes,routes);assert.ok(inspected.availableModels.includes(routes.coder));
  const same=await h.tools.delivery_configure.execute('c',{routes:{coder:routes.coder}},null,null,h.ctx);
  assert.match(same.content[0].text,/already configured/);assert.deepEqual(h.controller.state(),before);assert.deepEqual(h.calls,[]);
+});
+test('delivery dev and full shortcuts change the default profile for new plans',async()=>{
+ const h=harness();await h.events.session_start({},h.ctx);
+ await h.commands.delivery.handler('dev',h.ctx);assert.equal(h.config.projectProfiles['/repo'],'dev');
+ await h.commands.delivery.handler('full',h.ctx);assert.equal(h.config.projectProfiles['/repo'],'default');
+ assert.deepEqual(h.commands.delivery.getArgumentCompletions('d').map(item=>item.value),['dev']);
 });
 for(const decision of ['approve','decline','no-ui','config-race','state-race','shutdown','workspace-change'])test(`route change on pending proposal: ${decision}`,async()=>{
  const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']});await h.events.session_start({},h.ctx);

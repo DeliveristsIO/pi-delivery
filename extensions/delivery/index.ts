@@ -13,6 +13,7 @@ export default function (pi: ExtensionAPI) {
       {additionalProperties:false,description:'Optional ordered failover routes. Only recognized transport failures may use them.'}
     ))}),
     resume: Type.Object({taskChecks: Type.Optional(Type.Array(Type.Array(Type.String(), {minItems:1,maxItems:10}), {minItems:1,maxItems:12,description:'Legacy check-order recovery only: derive executable checks for EVERY existing task from the approved source plan. Keeps final checks, task scope and completed coder evidence; shows a correction confirmation. It is separate from correction-bound extension and final-exhaustion inspection.'}))}),
+    scope: Type.Object({decision: Type.Optional(Type.String({enum:['approve','reject','split'],description:'approve the exact discovered files after confirmation; reject or split preserve them and keep delivery blocked. Omit after an explicit user acceptance to approve.'}))}),
     execute: Type.Object({planFile: Type.Optional(Type.String({description:'Existing Markdown plan under docs/spark/plans/ explicitly requested for execution; no prior registration needed.'}))}),
     diff: Type.Object({ offset: Type.Optional(Type.Integer({minimum:0,description:'Continue a truncated diff from this character offset.'})), commits: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: 'Read the last N committed changes rather than the working-tree diff.' })) }),
     plan: Type.Object({
@@ -21,6 +22,7 @@ export default function (pi: ExtensionAPI) {
       changeType: Type.Optional(Type.String({enum:['feature','bug','chore'],description:'Required for fresh implementation plans; omitted for review-plan schema compatibility.'})),
       reviewPolicy: Type.Optional(Type.String({enum:['balanced','strict'],description:'Implementation review lifecycle: balanced (default) combines specification and quality review; strict opts into separate reviews.'})),
       executionProfile: Type.Optional(Type.String({enum:['dev','default'],description:'Override the configured profile for this proposal. dev is recommended for small low-risk changes; default is the full delivery flow.'})),
+      scopePolicy: Type.Optional(Type.String({enum:['adaptive','strict'],description:'Scope boundary for implementation. adaptive pauses for explicit approval when necessary files are discovered; strict blocks until the plan is changed.'})),
       start: Type.Optional(Type.Boolean({description:'Set false only when the user requested planning without execution. It always prevents launch.'})),
       executionIntent: Type.Optional(Type.Object({
         kind: Type.Literal('explicit-implementation'),
@@ -38,6 +40,7 @@ export default function (pi: ExtensionAPI) {
         instructions: Type.String({ maxLength: 16000 }),
         files: Type.Array(Type.String(), { minItems: 1, maxItems: 100 }),
         sensitive: Type.Optional(Type.Boolean({description:'Explicitly mark this task security-sensitive; balanced policy runs task security review only when true.'})),
+        browser: Type.Optional(Type.Boolean({description:'Use an installed browser-control extension for bounded web/UI checks. Browser access is granted only to this task and only when browser tools are available.'})),
         checks: Type.Optional(Type.Array(Type.String(), {minItems:1,maxItems:10,description:'Implementation checks run after THIS task, before its independent reviews. Required for every implementation task. Never require files delivered by a later task.'})),
         acceptance: Type.Array(Type.String(), { minItems: 1, maxItems: 30 }),
       }), { minItems: 1, maxItems: 12 }),

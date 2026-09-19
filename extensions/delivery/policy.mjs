@@ -63,11 +63,13 @@ export function validatePlan(input) {
   }
   if(input.changeType!==undefined)check(input.mode!=='review' && CHANGE_TYPES.includes(input.changeType),'changeType must be feature, bug, or chore and is only valid for implementation plans');
   if(input.reviewPolicy!==undefined)check(input.mode!=='review' && REVIEW_POLICIES.includes(input.reviewPolicy),'reviewPolicy must be balanced or strict and is only valid for implementation plans');
+  if(input.scopePolicy!==undefined)check(input.mode!=='review' && ['strict','adaptive'].includes(input.scopePolicy),'scopePolicy must be strict or adaptive and is only valid for implementation plans');
   if(input.commits!==undefined)check(input.mode==='review' && Number.isInteger(input.commits) && input.commits>=1 && input.commits<=20,'commits requires review mode and 1–20 commits');
   check(Array.isArray(input.tasks) && input.tasks.length>0 && input.tasks.length<=12, 'Plan needs 1–12 tasks');
   for (const t of input.tasks) {
     check(text(t.title,200) && text(t.instructions), 'Invalid task instructions');
     if(t.sensitive!==undefined)check(typeof t.sensitive==='boolean','Task sensitivity must be a boolean');
+    if(t.browser!==undefined)check(typeof t.browser==='boolean','Task browser flag must be a boolean');
     check(Array.isArray(t.files) && t.files.length>0 && t.files.length<=100 && t.files.every(f=>text(f,512) && !f.startsWith('/') && !f.startsWith(':') && !f.includes('\\') && !f.split('/').includes('..') && !f.split('/').includes('.git')), 'Invalid task files');
     if(t.checks!==undefined)check(validChecks(t.checks,input.mode!=='review'),'Task checks must be executable commands (nonempty for implementation)');
     check(Array.isArray(t.acceptance) && t.acceptance.length>0 && t.acceptance.length<=30 && t.acceptance.every(a=>text(a,2000)), 'Task needs acceptance criteria');
@@ -113,7 +115,7 @@ export function repairCheckScopes(state,taskChecks) {
   return s;
 }
 export function parentToolAllowed(name, input) {
-  if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_status','delivery_diff','delivery_configure','delivery_steer'].includes(name)) return true;
+  if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_scope','delivery_status','delivery_diff','delivery_configure','delivery_steer'].includes(name)) return true;
   if (name==='subagent') return ['status','list','get','models','guide','doctor','children.list'].includes(input?.action);
   // Keep reply out of this global allowlist: only the extension's active-owned-run
   // interception admits native supervisor replies, which are informational evidence
@@ -134,8 +136,8 @@ export function executionProfile(value='default') {
 }
 export function profileDefaults(profile='default') {
   executionProfile(profile);
-  if(profile==='dev') return {timeouts:{coderMs:10*60000,continuationMs:5*60000,reviewMs:5*60000,commandMs:60000,idleWarningMs:120000,deadlineWarningMs:120000},corrections:{maxFixRounds:1},optimizer:false,aggregateSecurity:false};
-  return {timeouts:{},corrections:{},optimizer:true,aggregateSecurity:true};
+  if(profile==='dev') return {timeouts:{coderMs:10*60000,continuationMs:5*60000,reviewMs:5*60000,commandMs:60000,idleWarningMs:120000,deadlineWarningMs:120000},corrections:{maxFixRounds:1},optimizer:false,aggregateSecurity:false,scopePolicy:'adaptive'};
+  return {timeouts:{},corrections:{},optimizer:true,aggregateSecurity:true,scopePolicy:'adaptive'};
 }
 export function recommendExecution(plan) {
   check(plan && typeof plan==='object','Execution recommendation needs a plan');
@@ -184,7 +186,7 @@ export function executionAuthorityMatches(authority,binding) {
   return authority?.version===1 && JSON.stringify(authorityBinding(authority))===JSON.stringify(authorityBinding(binding));
 }
 export function initialState() {
-  return {version:1,enabled:false,stage:'planning',task:0,round:0,aggregateRound:0,plan:null,routes:null,fallbacks:null,snapshot:null,active:null,reports:[],feedback:'',reason:'',gitPolicy:null,optimizerPasses:{},optimizerBypass:false,reviewedContentSnapshot:null,reviewContentCandidate:null};
+  return {version:1,enabled:false,stage:'planning',task:0,round:0,aggregateRound:0,plan:null,routes:null,fallbacks:null,snapshot:null,active:null,reports:[],feedback:'',reason:'',gitPolicy:null,scopeProposal:null,optimizerPasses:{},optimizerBypass:false,reviewedContentSnapshot:null,reviewContentCandidate:null};
 }
 function cumulativeFeedback(previous, report) {
   const entry=JSON.stringify({summary:report.summary,findings:report.findings});

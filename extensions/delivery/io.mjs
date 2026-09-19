@@ -15,6 +15,7 @@ export function loadConfig(path=configPath()) {
   const c=jsonFile(path,65536);
   if(c.version!==1 || !c.routes || !Array.isArray(c.repos) || !c.repos.every(p=>typeof p==='string')) throw new Error('Invalid delivery configuration');
   if(c.profile!==undefined && c.profile!=='default' && c.profile!=='dev') throw new Error('Invalid delivery execution profile');
+  if(c.projectProfiles!==undefined && (!c.projectProfiles || typeof c.projectProfiles!=='object' || Array.isArray(c.projectProfiles) || Object.values(c.projectProfiles).some(profile=>profile!=='default' && profile!=='dev'))) throw new Error('Invalid project delivery profiles');
   return c;
 }
 export function saveConfig(path,c) {

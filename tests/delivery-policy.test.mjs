@@ -8,6 +8,7 @@ export const plan = { title: 'Fixture', tasks: [{ title: 'Task', instructions: '
 test('execution recommendation distinguishes fast dev from full flow and suggests splitting broad work',()=>{
  assert.equal(profileDefaults('dev').timeouts.coderMs,10*60000);
  assert.equal(profileDefaults('dev').optimizer,false);
+ assert.equal(profileDefaults('default').scopePolicy,'adaptive');
  assert.equal(recommendExecution({...plan,security:false}).profile,'dev');
  assert.equal(recommendExecution(plan).profile,'default');
  assert.equal(recommendExecution({...plan,security:false,tasks:[{...plan.tasks[0],files:Array.from({length:9},(_,i)=>`f${i}`)}]}).split,true);
@@ -37,6 +38,11 @@ test('plan must have bounded concrete scope and verification', () => {
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], checks:undefined}]}), /explicit task.checks/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:['../escape']}]}), /files/);
   assert.throws(() => validatePlan({...plan, tasks:[{...plan.tasks[0], files:[':(exclude)src/a.js']}]}), /files/);
+});
+test('browser verification is an explicit task capability', () => {
+  const browserPlan=validatePlan({...plan,tasks:[{...plan.tasks[0],browser:true}]});
+  assert.equal(browserPlan.tasks[0].browser,true);
+  assert.throws(()=>validatePlan({...plan,tasks:[{...plan.tasks[0],browser:'yes'}]}),/browser flag/i);
 });
 test('correction adoption is an explicit implementation-only exact user attestation',()=>{
  const adoption={kind:'retained-candidate',userTurn:'Implement the reviewed corrections'};

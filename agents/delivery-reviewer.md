@@ -1,7 +1,7 @@
 ---
 name: delivery-reviewer
 description: Independently review approved-task compliance or code quality without editing.
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, bash, browser_open, browser_screenshot, browser_inspect_element, browser_click, browser_type, browser_hover, browser_scroll, browser_console_logs, browser_navigate, browser_close, browser_snapshot, browser_take_screenshot, browser_reload, browser_press_key, browser_fill_form, browser_select_option, browser_tabs, browser_evaluate, browser_wait_for, browser_resize
 inheritProjectContext: true
 inheritSkills: false
 defaultContext: fresh
