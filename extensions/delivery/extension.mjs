@@ -6,6 +6,7 @@ import {modelLabel,ROLE_HELP} from './setup.mjs';
 
 const ENTRY='delivery-coordinator-v2';
 const READ_TOOLS=['read','grep','find','ls'];
+const PARENT_TOOLS=[...READ_TOOLS,'delivery_plan','delivery_execute','delivery_status','delivery_configure','delivery_resume','delivery_stop'];
 const MAX_CORRECTIONS=2;
 const result=(text,details={})=>({content:[{type:'text',text}],details});
 const initial=()=>({version:2,enabled:false,stage:'planning',plan:null,active:null,task:0,round:0,changedPaths:{},reports:[],checks:[],reason:''});
@@ -18,7 +19,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   let state=initial(),ctx,root,legacy=false,job=null,preparing=false,closed=false,approval=false,toolsBefore,checkController;
   const available=()=>ctx.modelRegistry.getAvailable();
   const config=()=>d.loadConfig(d.configPath());
-  const owner=()=>({session:state.session,run:state.run,pid:process.pid});
+  const owner=()=>({session:state.session,run:state.run,pid:process.pid,fence:state.lockFence});
   function nativeOwnerSession() {
     if(typeof state.session!=='string' || !state.session.trim() || state.session!==ctx.sessionManager.getSessionId() || state.root!==root || root!==d.repoRoot(ctx.cwd))throw new Error('Parent session/repository ownership is unverified; inspect retained worker identity.');
     // pi-subagents resolveCurrentSessionId prefers the session file; locks keep the Pi UUID.
@@ -26,13 +27,15 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     if(typeof session!=='string' || !session.trim())throw new Error('Native owner-session identity is unavailable; inspect the current session.');
     return session;
   }
-  function bindActiveNativeSession() {
-    const session=nativeOwnerSession(),active=state.active;
+  function bindActiveNativeSession(persist=true) {
+    const session=nativeOwnerSession(),active={...state.active};
     if(active.session!==state.session || typeof active.id!=='string' || !active.id.trim() || typeof active.dir!=='string' || !active.dir.trim())throw new Error('Retained native worker ownership/identity is unverified; inspect without launching a replacement.');
     // Only old v2 reservations lack nativeSession. Normalize from verified parent
     // context, never from returned status; preserve the known worker and its stage.
-    if(state.version===2 && !Object.hasOwn(active,'nativeSession')){active.nativeSession=session;save();}
+    if(state.version===2 && !Object.hasOwn(active,'nativeSession'))active.nativeSession=session;
     if(active.nativeSession!==session)throw new Error('Native worker owner-session mismatch with current session; retained binding unchanged.');
+    if(persist && state.active.nativeSession!==active.nativeSession){state.active=active;save();}
+    return active;
   }
   const display=text=>pi.sendMessage({customType:'delivery',content:text,display:true});
   const status=()=>`Delivery ${state.enabled?'ON':'OFF'} · ${state.stage}${state.plan?` · task ${state.task+1}/${state.plan.tasks.length}`:''}${state.active?` · native ${state.active.id || 'launch unresolved'}`:''}${state.reason?' · '+state.reason:''}`;
@@ -53,7 +56,11 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       const output=check.code!==0 || check.signal || check.terminated ? `\n  Output: ${clip(check.output,500)}` : '';
       return `${label(check)} ${clip(check.command,500)}: exit=${check.code ?? 'unknown'}${flags}${output}`;
     });
-    return clip([clip(status(),1000),
+    const next=state.pendingCheck?'Host check closure is unknown. Inspect its process evidence; do not replay checks or approve another plan.':state.active?.id
+      ? `${job?'Monitoring the retained worker.':'Call delivery_resume to observe/reconcile this exact retained worker, without new approval.'} delivery_stop requests cancellation only. If resume blocks, inspect the reported missing evidence; do not repeat approval/status/stop or restart to bypass it.`
+      : state.active?'Launch identity is unknown. Inspect native artifacts; no replacement or approval can resolve missing ownership.'
+      : state.stage==='blocked'?'Inspect the recorded failure. Approval is not recovery authority; no automatic retry.':'';
+    return clip([clip(status(),1000),next,
       clip(`Actual changed paths by task (all correction rounds): ${JSON.stringify(state.changedPaths || {})}`,1500),
       'Latest recorded task rounds only; pending checks/reviews are not approvals. Earlier rounds remain in details.',
       clip(reports.length?reports.join('\n'):'No native reports recorded.',5000),
@@ -76,7 +83,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   const routesFor=plan=>validateRoutes(config().routes,available().map(id),requiredRoles(plan));
   function restrictTools() {
     toolsBefore ??= pi.getActiveTools();
-    pi.setActiveTools([...READ_TOOLS,'delivery_plan','delivery_execute','delivery_status','delivery_configure']);
+    pi.setActiveTools(PARENT_TOOLS);
   }
   async function enable() {
     if(legacy)throw new Error('Unsupported legacy delivery journal preserved. Inspect native workers; start a new session only after they settle.');
@@ -160,14 +167,19 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
         if(!state.active.id)throw new Error('Unknown launch identity; inspect native subagent status. Automatic replay refused.');
         if(closed)return;
         bindActiveNativeSession();
-        await d.rpc(pi.events,'status',{id:state.active.id});
         let report;
-        try {report=d.readOutcome(state.active);}catch(error){
-          if(error.closed){state.active=null;if(state.stopping){state.stage='stopped';release();save();return;}}
+        try {
+          report=d.readOutcome(state.active);
+          if(!report){await d.rpc(pi.events,'status',{id:state.active.id,dir:state.active.dir});report=d.readOutcome(state.active);}
+        }catch(error){
+          if(error.closed){state.active=null;if(state.stopping || error.nativeState==='stopped'){state.stage='stopped';state.reason=error.message;release();save();return;}}
           throw error;
         }
         if(!report){await sleep(d.pollMs);continue;}
-        const native=state.active;state.active=null;
+        const native=state.active;
+        // Invalidate every journal still observing this worker BEFORE checks or
+        // the next reservation can start. Never persist the new fence with it.
+        state.lockFence=d.acquireLock(root,owner(),{active:native});state.active=null;
         if(state.stopping){state.stage='stopped';release();save();return;}
         validateReport(report);
         const next=d.snapshot(root);
@@ -205,29 +217,39 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       if(fleet?.fleet?.totalActive!==0)throw new Error('Native workers are live or ownership is unknown. Wait/inspect subagent status before delivery.');
       if(closed || state.stopping || !state.enabled)throw new Error('Delivery start cancelled before native launch.');
       if(JSON.stringify(routesFor(state.plan))!==JSON.stringify(state.routes))throw new Error('Routes changed during preflight; display a new proposal.');
-      d.acquireLock(root,owner());state.leased=true;
+      state.lockFence=d.acquireLock(root,owner());state.leased=true;
       state.stage=state.plan.mode==='review'?'quality':'coder';save();start();
     }catch(error){state.stage='blocked';state.reason=error.message;save();throw error;}
     finally{preparing=false;}
     return result('Delivery started; native workers own execution. Use delivery_status.');
   }
   async function stop() {
-    approval=false;state.stopping=true;save();checkController?.abort();
-    if(state.active?.id) {
-      bindActiveNativeSession();
-      await d.rpc(pi.events,'stop',{id:state.active.id});
-      state.reason='Native stop requested, not proven closed. Use /delivery resume to observe closure; never launch a replacement.';save();
-    } else if(state.active || state.pendingCheck)throw new Error('Unknown worker/check closure; inspect native status. No replacement is permitted.');
-    else if(!job){state.stage='stopped';release();save();}
+    guard();approval=false;state.stopping=true;save();checkController?.abort();
+    try {
+      if(state.active?.id) {
+        const active=bindActiveNativeSession(),native=d.readNativeStatus(active);
+        if(native.state==='running') {
+          await d.rpc(pi.events,'stop',{id:active.id,dir:active.dir});
+          state.reason='Native stop requested, not proven closed. Call delivery_resume to observe closure; never launch a replacement.';
+        } else state.reason=`Native worker reports ${native.state}; cancellation not sent. Call delivery_resume to verify closure; stopped remains stopped.`;
+        save();
+      } else if(state.active || state.pendingCheck)throw new Error('Unknown worker/check closure; inspect native evidence. No replacement is permitted.');
+      else if(!job){release();state.stage='stopped';save();}
+    }catch(error){state.reason=`Stop not confirmed: ${error.message} Inspect evidence; delivery_resume only observes the retained worker.`;save();throw new Error(state.reason);}
+    return result(evidenceText(),structuredClone(state));
   }
   async function resume() {
-    guard();if(job)throw new Error('Already monitoring native execution');
+    guard();if(preparing)throw new Error('Delivery ownership operation is already in progress');
+    if(job)return result('Already monitoring the exact retained worker; use delivery_status for evidence.');
     if(!state.active?.id)throw new Error('Resume only monitors a known native worker. Unknown launches/checks and failed runs require inspection; no automatic retry.');
-    bindActiveNativeSession();
-    d.acquireLock(root,owner());
-    if(!state.stopping)(state.active.stage==='coder'?assertCoderChanges:assertUnchanged)(state.snapshot,d.snapshot(root));
-    // Resume observes this exact worker; it never revives or replaces one.
-    state.stage=state.active.stage;state.reason='';closed=false;save();start();
+    try {
+      const active=bindActiveNativeSession(false);
+      if(!state.stopping)(active.stage==='coder'?assertCoderChanges:assertUnchanged)(state.snapshot,d.snapshot(root));
+      state.lockFence=d.acquireLock(root,owner(),{active,pendingCheck:state.pendingCheck});state.leased=true;
+      // Only after ownership is obtained may normalization and monitoring persist.
+      state.active=active;state.stage=active.stage;state.reason='';closed=false;save();start();
+    }catch(error){state.stage='blocked';state.reason=error.message;save();throw error;}
+    return result(evidenceText(),structuredClone(state));
   }
   for(const [name,description,fn] of [
     ['plan','Display a bounded plan. Never launches; wait for explicit user approval.',async args=>{
@@ -237,7 +259,9 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       display(`${JSON.stringify({plan,routes,correctionRounds:MAX_CORRECTIONS,checksTimeoutMs:120000},null,2)}\nTask files are starting points, not a permission list; directly necessary repository edits reuse this approval. Implementation binds the configured security route for newly discovered sensitive paths. Commands run with your account permissions. No automatic Git writes or cleanup. Existing dirty work is preserved; ignored files are outside snapshot coverage. Reply Approved or Implement the displayed plan to approve this unchanged proposal.`);return result('Plan displayed; awaiting approval.');
     }],
     ['execute','Execute only the displayed unchanged plan after explicit user approval.',execute],
-    ['status','Inspect progress, native identity, actual check receipts and reports.',async()=>result(legacy?'Unsupported legacy journal preserved; no migration or resume.':evidenceText(),structuredClone(state))],
+    ['status','Inspect progress, native identity, actual check receipts, reports and next action.',async()=>result(legacy?'Unsupported legacy journal preserved; no migration or resume.':evidenceText(),structuredClone(state))],
+    ['resume','Observe/reconcile only the exact retained native worker. No new approval, revival, replacement or replay of accepted work.',resume],
+    ['stop','Request cancellation of the exact retained native worker. A request is not proven closure; resume observes closure.',stop],
     ['configure','Inspect exact configured routes, or confirm explicitly chosen changes. Legacy settings are retained.',async args=>{
       guard();const current=config();
       if(!args.routes)return result(JSON.stringify({routes:current.routes,available:available().map(modelLabel)},null,2));
@@ -267,9 +291,9 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     throw new Error('Use /delivery on|off|status|approve|stop|resume|setup');
   }});
   pi.on('input',async event=>{approval=Boolean(state.stage==='awaiting-approval' && ['interactive','rpc'].includes(event.source) && isApproval(event.text));return {action:'continue'};});
-  pi.on('tool_call',event=>{if(state.enabled && ![...READ_TOOLS,'delivery_plan','delivery_execute','delivery_status','delivery_configure'].includes(event.toolName))return {block:true,reason:'Delivery coordinator is read-only. Native workers execute approved changes; no unmanaged tools.'};});
+  pi.on('tool_call',event=>{if(state.enabled && !PARENT_TOOLS.includes(event.toolName))return {block:true,reason:'Delivery coordinator is read-only. Native workers execute approved changes; no unmanaged tools.'};});
   pi.on('user_bash',()=>{if(state.enabled)throw new Error('Delivery is coordinating; stop/off before running unmanaged shell commands.');});
-  pi.on('before_agent_start',()=>{if(state.enabled)return {message:{customType:'delivery-guidance',content:'Use orchestrate-delivery and SPARK methodology. Plan with delivery_plan; never launch for questions or planning-only intent. Only delivery_execute starts an approved unchanged proposal. Inspect delivery_status for real evidence; no direct subagents, Git writes or invented checks.',display:false}};});
+  pi.on('before_agent_start',()=>{if(state.enabled)return {message:{customType:'delivery-guidance',content:'Use orchestrate-delivery and SPARK methodology. Plan with delivery_plan; never launch for questions or planning-only intent. Only delivery_execute starts an approved unchanged proposal. Inspect delivery_status for real evidence. For continue on a retained worker, call delivery_resume without new approval; delivery_stop requests cancellation only. Report missing ownership/closure evidence rather than repeating approval/status/stop or asking for restart. Never replace from arbitrary text. No direct subagents, Git writes or invented checks.',display:false}};});
   const loadSession=async(_event,context)=>{
     if(toolsBefore)pi.setActiveTools(toolsBefore);
     ctx=context;closed=false;approval=false;state=initial();root=undefined;

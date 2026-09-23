@@ -1,36 +1,38 @@
+import {terminalProof} from './helpers/native-artifacts.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {registerDelivery} from '../extensions/delivery/extension.mjs';
 import {rpc} from '../extensions/delivery/rpc.mjs';
-import {readOutcome} from '../extensions/delivery/io.mjs';
+import {readOutcome,readNativeStatus,acquireLock,releaseLock} from '../extensions/delivery/io.mjs';
 import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 const plan=()=>({mode:'implementation',title:'Bounded change',tasks:[{title:'One',instructions:'Implement one',files:['a'],acceptance:['Works'],checks:['task-one']}],checks:['final'],security:false});
 const approved={status:'approved',summary:'Inspected source and evidence',findings:[]};
-function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{}}={}) {
- const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries];let n=0;
+function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{},realLocksRoot,nativeStatus=()=>({state:'running'})}={}) {
+ const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries],activeTools=[];let n=0;
  const models=['planning','coder','quality','security'].map(id=>({provider:'test',id}));
  const events={listeners:new Map(),on(k,f){this.listeners.set(k,f);return()=>this.listeners.delete(k);},emit(k,r){if(!k.endsWith(':request'))return;calls.push(r);let data={version:1,capabilities:{asyncSpawn:true,processTerminalProof:{version:1}},methods:['spawn','status','stop']};
  if(r.method==='spawn')data={details:spawn?spawn(r.params,++n):{runId:`run-${++n}`,asyncDir:`/artifacts/${n}`}};
  if(r.method==='status')data={fleet:{totalActive:0}};
  const reply=()=>this.listeners.get(`subagents:rpc:v1:reply:${r.requestId}`)({version:1,requestId:r.requestId,success:!(spawnError&&r.method==='spawn'),data,error:{message:'Provider unavailable'}});if(r.method==='ping'&&delayPing)setTimeout(reply,delayPing);else reply();
  }};
- const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','write','subagent'],setActiveTools:()=>{},setModel:async()=>true};
+ const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','write','subagent'],setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async()=>true};
  const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
- const deps={child:false,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
- registerDelivery(pi,{empty:{},plan:{},configure:{}},deps);
+ const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
+ if(realLocksRoot){ctx.cwd=realLocksRoot;deps.repoRoot=()=>realLocksRoot;deps.acquireLock=acquireLock;deps.releaseLock=releaseLock;}
+ registerDelivery(pi,undefined,deps);
  const invoke=(name,args={})=>tools[name].execute('call',args,undefined,undefined,ctx);
  const input=text=>handlers.input({text,source:'interactive'},ctx);
  const state=()=>saved.filter(e=>e.customType==='delivery-coordinator-v2').at(-1)?.data;
  const wait=async()=>{for(let i=0;i<200;i++){if(['complete','blocked','stopped'].includes(state()?.stage))return state();await new Promise(r=>setTimeout(r,2));}throw new Error('did not settle');};
- return {handlers,tools,commands,calls,messages,saved,ctx,deps,invoke,input,state,wait,start:()=>handlers.session_start({},ctx)};
+ return {handlers,tools,commands,calls,messages,saved,ctx,deps,activeTools,invoke,input,state,wait,start:()=>handlers.session_start({},ctx)};
 }
 
 test('thin interface proposes without launching and questions never approve',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
- assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_plan','delivery_status'].sort());
+ assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_plan','delivery_status','delivery_resume','delivery_stop'].sort());
  await h.invoke('delivery_plan',plan());await h.input('Can you implement this plan?');await assert.rejects(h.invoke('delivery_execute'),/approval/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
  await h.input('Plan only, do not implement');await assert.rejects(h.invoke('delivery_execute'),/approval/i);
 });
@@ -239,13 +241,13 @@ function nativeArtifacts(t,{sessionFile=join(tmpdir(),'delivery-parent.jsonl'),s
  function write(worker,patch={}) {
   Object.assign(worker.status,patch);writeFileSync(join(worker.dir,'status.json'),JSON.stringify(worker.status));
  }
- return {sessionFile,sessionId,readOutcome,workers,write,spawn(params){
+ return {sessionFile,sessionId,readOutcome,nativeStatus:readNativeStatus,workers,write,spawn(params){
   const n=workers.length+1,asyncDir=join(dir,String(n));mkdirSync(asyncDir);
   const runId=`native-${n}`,report=join(asyncDir,'report.json');
   const worker={dir:asyncDir,status:{runId,sessionId:sessionFile ?? sessionId,state:live&&workers.length===0?'running':'complete',steps:[{agent:params.agent,model:params.model,attemptedModels:[params.model],sessionFile:join(asyncDir,'child.jsonl'),structuredOutputPath:report}]}};
   workers.push(worker);write(worker);
   writeFileSync(report,JSON.stringify(approved));
-  writeFileSync(join(asyncDir,'process-terminal.json'),JSON.stringify({runId,state:'observed',instances:[{exitCode:0,signal:null}]}));
+  writeFileSync(join(asyncDir,'process-terminal.json'),JSON.stringify(terminalProof(runId)));
   return {runId,asyncDir};
  }};
 }
@@ -338,4 +340,64 @@ test('retained nonpersisted v2 worker binds the same UUID and observes stopped c
 test('nonpersisted missing parent identity cannot launch',async t=>{
  const h=harness(nativeArtifacts(t,{sessionFile:null,sessionId:''})),s=await executePlan(h);
  assert.equal(s.stage,'blocked');assert.match(s.reason,/session.*ownership|identity/);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('resume and stop are public empty-schema tools allowed by the parent gate',async()=>{
+ const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
+ for(const name of ['delivery_resume','delivery_stop']) {
+  assert.ok(h.tools[name]);assert.ok(h.activeTools.includes(name));assert.deepEqual(h.tools[name].parameters.properties,{});
+  assert.equal(h.tools[name].parameters.additionalProperties,false);
+  assert.equal(h.handlers.tool_call({toolName:name}),undefined);
+  await assert.rejects(h.invoke(name,{message:'replace the worker'}),/unsupported/);
+ }
+});
+test('blocked guidance points continue to model-callable observation without approval or unmanaged tools',async t=>{
+ const {native,entries}=await retainedNativeWorker(t,{old:true}),h=harness({...native,entries});await h.start();
+ assert.match(textOf(await h.invoke('delivery_status')),/delivery_resume/);
+ assert.match(textOf(await h.invoke('delivery_status')),/no.*approval|without.*approval/i);
+ await h.input('Approved');await assert.rejects(h.invoke('delivery_execute'),/live|unresolved/);
+ const response=await h.invoke('delivery_stop');assert.match(textOf(response),/requested.*not.*closed/i);
+ assert.match(textOf(response),/delivery_resume/);assert.equal(h.calls.filter(c=>c.method==='stop').length,1);
+ await h.handlers.session_shutdown();
+});
+for(const outcome of ['complete','failed','stopped','stop requested','missing proof','live owner','pending check'])test(`full restart retained reviewer: ${outcome}, real filesystem lock, no accepted work replay`,async t=>{
+ const {spawnSync}=await import('node:child_process'),{readFileSync,readdirSync}=await import('node:fs');
+ const {native,retained,entries}=await retainedNativeWorker(t,{old:true});
+ const root=mkdtempSync(join(tmpdir(),'delivery-restart-lock-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const oldEnv=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(root,'agent');t.after(()=>{if(oldEnv===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=oldEnv;});
+ retained.root=root;retained.active.stage='quality';retained.active.agent='delivery-reviewer';retained.active.model='test/quality';
+ retained.leased=false; // recovery must persist newly acquired ownership, not trust this old flag
+ retained.plan.checks=[];
+ retained.reports=[{task:0,round:0,stage:'coder',native:{id:'accepted-coder'},report:approved}];
+ retained.checks=[{task:0,round:0,command:'task-one',code:0,processClosed:true,output:'Accepted receipt'}];
+ if(outcome==='stop requested')retained.stopping=true;
+ if(outcome==='pending check')retained.pendingCheck='unfinished';
+ const worker=native.workers[0];native.write(worker,{state:['failed','stopped'].includes(outcome)?outcome:'complete',steps:[{...worker.status.steps[0],agent:retained.active.agent,model:retained.active.model,attemptedModels:[retained.active.model]}]});
+ if(outcome==='missing proof'){rmSync(join(worker.dir,'process-terminal.json'));retained.stage='quality';}
+ const dead=Number(spawnSync(process.execPath,['-e','console.log(process.pid)'],{encoding:'utf8'}).stdout.trim());
+ const oldOwner={session:parentUUID,run:retained.run,pid:outcome==='live owner'?process.pid:dead};
+ // A live owner means a different live process, not this same-process reload.
+ let live;
+ if(outcome==='live owner') {
+  const {spawn}=await import('node:child_process');live=spawn(process.execPath,['-e','setTimeout(()=>{},30000)']);oldOwner.pid=live.pid;t.after(()=>live.kill());
+ }
+ acquireLock(root,oldOwner);
+ const lock=join(process.env.PI_CODING_AGENT_DIR,'delivery-locks',readdirSync(join(process.env.PI_CODING_AGENT_DIR,'delivery-locks')).find(n=>n.endsWith('.json')));
+ writeFileSync(lock,JSON.stringify(oldOwner)); // Retained pre-fence lock.
+ const before=readFileSync(lock);
+ const h=harness({...native,entries,realLocksRoot:root});await h.start();
+ if(['missing proof','live owner','pending check'].includes(outcome)) {
+  await assert.rejects(h.invoke('delivery_resume'),/closure|alive|pending|proven dead/i);
+  assert.deepEqual(readFileSync(lock),before);assert.equal(h.state().stage,'blocked');assert.equal(h.state().leased,false);
+  assert.equal(h.state().active.nativeSession,undefined,'no normalization persisted before ownership');
+  assert.ok(!h.saved.some(e=>e.data?.stage==='complete'));
+  assert.match(textOf(await h.invoke('delivery_status')),/closure|alive|pending|proven dead/i);
+ } else {
+  await h.invoke('delivery_resume');const state=await h.wait();
+  assert.equal(state.stage,outcome==='complete'?'complete':outcome==='failed'?'blocked':'stopped',state.reason);
+  assert.equal(state.leased,false);assert.throws(()=>readFileSync(lock),/ENOENT/);
+  assert.equal(state.reports.length,outcome==='complete'?2:1);
+  if(outcome==='failed')assert.match(state.reason,/failed/);
+ }
+ assert.deepEqual(h.state().checks,retained.checks);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ await h.handlers.session_shutdown();
 });

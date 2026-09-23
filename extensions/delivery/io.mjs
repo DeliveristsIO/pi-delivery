@@ -99,36 +99,97 @@ export function workingTreeEvidence(root) {
   const text=`STATUS (includes untracked paths; read their source directly):\n${status}\nTRACKED DIFF:\n${patch}`;
   return text.slice(0,40000)+(text.length>40000?'\n[Diff clipped. Read the approved source files; do not infer a clean review from this preview.]':'');
 }
-const lockPath=root=>join(agentDir(),'delivery-locks',hash(root)+'.json');
-export function acquireLock(root,owner) {
-  const path=lockPath(root);mkdirSync(dirname(path),{recursive:true});
-  try {writeFileSync(path,JSON.stringify(owner),{flag:'wx',mode:0o600});}
-  catch(e) {
-    if(e.code!=='EEXIST')throw e;
-    const retained=jsonFile(path);
-    if(retained.session!==owner.session || retained.run!==owner.run || retained.pid!==owner.pid)throw new Error(`Workspace delivery lock is owned by session ${retained.session}. Stop/inspect that native run first; never remove an unknown/live writer lock. Lock: ${path}`);
+const lockPath=root=>join(agentDir(),'delivery-locks',hash(realpathSync(root))+'.json');
+const sameFence=(a,b)=>a?.fence===b.fence && (a?.fence===undefined || typeof a.fence==='string' && a.fence.length>0);
+const sameOwner=(a,b)=>a?.session===b.session && a?.run===b.run && a?.pid===b.pid && sameFence(a,b);
+const ownerText=owner=>`pid=${owner?.pid ?? 'unknown'} session=${owner?.session ?? 'unknown'} run=${owner?.run ?? 'unknown'} fence=${owner?.fence ?? 'legacy'}`;
+function readLock(path) {try{return jsonFile(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}}
+function withLockGuard(path,operation) {
+  const guard=path+'.guard';
+  try {writeFileSync(guard,JSON.stringify({pid:process.pid}),{flag:'wx',mode:0o600});}
+  catch(error){if(error.code==='EEXIST')throw new Error(`Lock operation guard exists; ownership/operation closure unknown. Inspect ${guard}; no automatic removal.`);throw error;}
+  try {return operation();}finally{unlinkSync(guard);}
+}
+export function acquireLock(root,owner,{active,pendingCheck}={}) {
+  const path=lockPath(root);let retained;
+  const diagnostic=error=>new Error(`Workspace delivery lock owned/stored ${ownerText(retained)}; current ${ownerText(owner)}. ${error.message} Inspect exact retained native evidence; no force unlock or replacement. Lock: ${path}`);
+  function inspect() {
+    retained=readLock(path);
+    if(pendingCheck)throw new Error(`Host check closure is pending: ${pendingCheck}; cannot reconcile.`);
+    if(!retained) {if(active)throw new Error('Retained worker lock is missing; ownership evidence unavailable.');return;}
+    if(retained.session!==owner.session || retained.run!==owner.run)throw new Error('Foreign session/run ownership.');
+    if(!sameFence(retained,owner))throw new Error('Stale or missing journal fence; inspect the latest retained state, not an earlier worker proof.');
+    if(sameOwner(retained,owner))return;
+    if(!Number.isSafeInteger(retained.pid) || retained.pid<=0)throw new Error('Previous owner process liveness is unknown (invalid pid).');
+    try {process.kill(retained.pid,0);throw new Error('Previous owner process is alive.');}
+    catch(error){if(error.code!=='ESRCH')throw new Error(`Previous owner process not proven dead: ${error.message}`);}
+    if(!active || active.session!==owner.session)throw new Error('Known retained native worker/session evidence is required.');
+    if(!readNativeClosure(active))throw new Error(`Exact native worker ${active.id} in ${active.dir} (owner=${active.nativeSession}) is live or observed process-terminal.json closure is pending/unknown. A restart cannot supply the spawning parent's missing close observation.`);
   }
+  try {
+    // Inspect first, then revalidate under a short exclusive filesystem guard.
+    inspect();const inspected=JSON.stringify(retained);mkdirSync(dirname(path),{recursive:true});
+    return withLockGuard(path,()=>{
+      if(JSON.stringify(readLock(path))!==inspected)throw new Error('Lock ownership changed since inspection; no reconciliation performed.');
+      inspect();
+      // Every acquisition fences earlier journal copies, including legacy records.
+      // The coordinator reacquires before consuming a worker and advancing work.
+      const next={...owner,fence:randomUUID()};
+      if(!retained)writeFileSync(path,JSON.stringify(next),{flag:'wx',mode:0o600});
+      else saveConfig(path,next);
+      return next.fence;
+    });
+  }catch(error){throw diagnostic(error);}
 }
 export function releaseLock(root,owner) {
-  const path=lockPath(root),retained=jsonFile(path);
-  if(retained.session!==owner.session || retained.run!==owner.run || retained.pid!==owner.pid)throw new Error('Workspace lock ownership changed; inspect before continuing');
-  unlinkSync(path);
+  const path=lockPath(root);
+  return withLockGuard(path,()=>{
+    const retained=readLock(path);
+    if(!retained || !sameOwner(retained,owner))throw new Error(`Workspace lock ownership changed: stored ${ownerText(retained)}; current ${ownerText(owner)}. Inspect before continuing.`);
+    unlinkSync(path);
+  });
 }
-export function readOutcome(active) {
+const terminalStates=['complete','failed','partial','stopped','paused','blocked','rejected'];
+export function readNativeStatus(active) {
+  if(typeof active?.id!=='string' || !active.id.trim() || typeof active.dir!=='string' || !isAbsolute(active.dir) || realpathSync(active.dir)!==active.dir)throw new Error('Native worker ID/directory identity is unverified');
   const status=jsonFile(join(active.dir,'status.json'));
   if(status.runId!==active.id)throw new Error('Native worker run-ID identity mismatch');
   if(typeof active.nativeSession!=='string' || !active.nativeSession.trim() || status.sessionId!==active.nativeSession)throw new Error('Native worker owner-session identity mismatch');
-  if(!['complete','failed','partial','stopped','paused','blocked','rejected'].includes(status.state))return null;
-  const path=join(active.dir,'process-terminal.json');
-  const terminal=existsSync(path)?jsonFile(path):null;
+  return status;
+}
+export function readNativeClosure(active) {
+  const status=readNativeStatus(active);
+  if(!terminalStates.includes(status.state))return null;
+  const path=join(active.dir,'process-terminal.json'),terminal=existsSync(path)?jsonFile(path):null;
   if(terminal && terminal.runId!==active.id)throw new Error('Native terminal proof identity mismatch; inspect subagent status.');
-  if(!terminal || terminal.state!=='observed' || !terminal.instances?.length) {
-    const endedAt=status.endedAt ?? status.lastUpdate ?? active.startedAt;
-    if(Number.isFinite(endedAt) && Date.now()-endedAt>60000)throw new Error('Native terminal proof is still unavailable; inspect subagent status, then resume monitoring this worker. No replacement launched.');
+  if(!terminal || terminal.state==='pending' || terminal.state==='not-started')return null;
+  const invalid=reason=>{throw new Error(`Native terminal proof ${reason}; inspect ${path}. No closure established.`);};
+  // pi-subagents v1 authoritative sidecar (finalizeProcessTerminal), not status.state,
+  // candidate records, PID death, or a child-step projection. In-runner children
+  // legitimately produce runner-only instances; subprocess writers need tree proof.
+  if(terminal.version!==1 || terminal.state!=='observed' || typeof terminal.runnerProcessInstanceId!=='string' || !terminal.runnerProcessInstanceId || !Number.isFinite(terminal.observedAt) || !Array.isArray(terminal.instances))invalid(`is malformed or unknown${terminal.reason?` (${terminal.reason})`:''}`);
+  if(status.processTerminal?.runnerProcessInstanceId && status.processTerminal.runnerProcessInstanceId!==terminal.runnerProcessInstanceId)invalid('runner identity mismatch');
+  const runners=terminal.instances.filter(i=>i?.kind==='runner');
+  if(runners.length!==1 || runners[0].processInstanceId!==terminal.runnerProcessInstanceId)invalid('matching runner close is missing');
+  const ids=new Set();
+  for(const i of terminal.instances) {
+    if(!i || typeof i.processInstanceId!=='string' || !i.processInstanceId || ids.has(i.processInstanceId) || !Number.isFinite(i.closeObservedAt) || !(i.exitCode===null || Number.isInteger(i.exitCode)) || !(i.signal===null || typeof i.signal==='string'))invalid('instance close is malformed');
+    ids.add(i.processInstanceId);
+    if(i.kind==='runner') {if(i.attempt!==undefined)invalid('runner instance is malformed');}
+    else if(i.kind!=='pi-writer' || !Number.isInteger(i.attempt) || i.attempt<0 || i.processTree?.state!=='observed' || i.processTree.mechanism!=='posix-process-group' || !Number.isInteger(i.processTree.processGroupId) || i.processTree.processGroupId<=0 || !Number.isFinite(i.processTree.verifiedAt))invalid('writer process-tree closure is unknown or malformed');
+  }
+  return {status,terminal};
+}
+export function readOutcome(active) {
+  const closure=readNativeClosure(active);
+  if(!closure) {
+    const status=readNativeStatus(active),endedAt=status.endedAt ?? status.lastUpdate ?? active.startedAt;
+    if(terminalStates.includes(status.state) && Number.isFinite(endedAt) && Date.now()-endedAt>60000)throw new Error('Native terminal proof is still unavailable; inspect native artifacts. Resume only after closure evidence becomes available; no replacement launched.');
     return null;
   }
+  const {status,terminal}=closure;
   if(status.state!=='complete' || terminal.instances.some(i=>i.exitCode!==0 || i.signal)) {
-    const error=new Error(`Native worker ${active.id} ${status.state}: ${status.error || 'runner did not close successfully'}. Inspect native subagent status; no retry launched.`);error.closed=true;throw error;
+    const error=new Error(`Native worker ${active.id} ${status.state}: ${status.error || 'runner did not close successfully'}. Inspect native evidence; no retry launched.`);error.closed=true;error.nativeState=status.state;throw error;
   }
   const step=status.steps?.[0];
   if(status.steps?.length!==1 || step.agent!==active.agent || step.model!==active.model || !step.attemptedModels?.length || step.attemptedModels.some(model=>model!==active.model))throw new Error('Native worker agent/model evidence missing or differs from exact approved route');

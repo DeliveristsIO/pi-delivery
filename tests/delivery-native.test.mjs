@@ -1,7 +1,8 @@
+import {terminalProof} from './helpers/native-artifacts.mjs';
 // Optional no-inference contract check against the installed native bridge.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync,readFileSync,mkdtempSync,writeFileSync,rmSync} from 'node:fs';
+import {existsSync,readFileSync,mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {homedir,tmpdir} from 'node:os';
 import {createRequire} from 'node:module';
@@ -54,7 +55,7 @@ test('delivery binds the installed resolveCurrentSessionId identity before spawn
     assert.equal(state().session,sessionId);assert.equal(state().active.nativeSession,nativeOwner);
     const asyncDir=mkdtempSync(join(root,'worker-')),runId='synthetic-run',report=join(asyncDir,'report.json');
     writeFileSync(join(asyncDir,'status.json'),JSON.stringify({runId,sessionId:nativeOwner,state:'complete',steps:[{agent:params.agent,model:params.model,attemptedModels:[params.model],sessionFile:join(asyncDir,'child.jsonl'),structuredOutputPath:report}]}));
-    writeFileSync(join(asyncDir,'process-terminal.json'),JSON.stringify({runId,state:'observed',instances:[{exitCode:0,signal:null}]}));
+    writeFileSync(join(asyncDir,'process-terminal.json'),JSON.stringify(terminalProof(runId)));
     writeFileSync(report,JSON.stringify({status:'approved',summary:'Offline identity fixture',findings:[]}));
     return {details:{runId,asyncDir}};
    }});
@@ -65,5 +66,24 @@ test('delivery binds the installed resolveCurrentSessionId identity before spawn
   for(let i=0;i<100&&!['complete','blocked'].includes(state().stage);i++)await new Promise(resolve=>setTimeout(resolve,1));
   assert.equal(state().stage,'complete',state().reason);assert.equal(launches,1);assert.equal(state().reports[0].native.nativeSession,nativeOwner);
   await handlers.session_shutdown();
+ }
+});
+test('installed finalizeProcessTerminal produces the closure contract consumed by Delivery offline',{skip:!existsSync(join(installed,'src/runs/background/process-terminal.ts'))},async t=>{
+ const require=createRequire(join(installed,'package.json')),{createJiti}=require('jiti');
+ const native=await createJiti(import.meta.url,{moduleCache:false,fsCache:false}).import(join(installed,'src/runs/background/process-terminal.ts'));
+ const {readNativeClosure}=await import('../extensions/delivery/io.mjs');
+ const root=mkdtempSync(join(tmpdir(),'delivery-terminal-contract-')),dir=join(root,'native');mkdirSync(dir);t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const active={id:'offline-run',dir,nativeSession:'offline-owner',agent:'delivery-reviewer',model:'fixture/review'};
+ const report=join(dir,'report.json');
+ writeFileSync(report,JSON.stringify({status:'approved',summary:'Native generated closure contract',findings:[]}));
+ for(const state of ['complete','failed','stopped']) {
+  native.initializeProcessTerminal(dir,active.id,'offline-runner');
+  writeFileSync(join(dir,'status.json'),JSON.stringify({runId:active.id,sessionId:active.nativeSession,state,steps:[{agent:active.agent,model:active.model,attemptedModels:[active.model],structuredOutputPath:report}]}));
+  native.writeProcessTerminalCandidate(dir,{version:1,runId:active.id,runnerProcessInstanceId:'offline-runner',writers:{0:[]},expectedWriters:{0:0}});
+  assert.equal(readNativeClosure(active),null,'candidate/status alone are not closure');
+  const proof=native.finalizeProcessTerminal(dir,active.id,{processInstanceId:'offline-runner',closeObservedAt:Date.now(),exitCode:state==='failed'?1:0,signal:null});
+  assert.equal(proof.state,'observed');assert.deepEqual(readNativeClosure(active).terminal,proof);
+  if(state==='complete')assert.equal(readOutcome(active).status,'approved');
+  else assert.throws(()=>readOutcome(active),e=>e.closed && e.nativeState===state);
  }
 });

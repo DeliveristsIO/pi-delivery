@@ -1,3 +1,4 @@
+import {terminalProof} from './helpers/native-artifacts.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,rmSync,utimesSync} from 'node:fs';
@@ -27,7 +28,7 @@ test('completion requires actual terminal proof, model and structured report',t=
  const a={id,dir:d,model:'custom/a',agent:'delivery-coder',nativeSession:'session'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:id,sessionId:'session',state:'complete',steps:[{agent:'delivery-coder',model:'custom/a',attemptedModels:['custom/a'],sessionFile:join(d,'actual-session.jsonl'),structuredOutputPath:join(d,'report.json')}]}));
  assert.equal(readOutcome(a),null);
- writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:id,state:'observed',instances:[{exitCode:0,signal:null}]}));
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify(terminalProof(id)));
  writeFileSync(join(d,'report.json'),JSON.stringify({status:'approved',summary:'ok',findings:[]}));
  assert.equal(readOutcome(a).status,'approved');
  assert.throws(()=>readOutcome({...a,model:'other/a'}),/model/);
@@ -76,21 +77,21 @@ test('controlled inspection paginates bounded output',t=>{
 });
 test('workspace lock excludes another session and never steals unknown ownership',t=>{
  const d=fixture(t),old=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=d;t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
- const owner={session:'one',run:'first'};io.acquireLock('/workspace',owner);io.acquireLock('/workspace',owner);
- assert.throws(()=>io.acquireLock('/workspace',{session:'two',run:'second'}),/owned/);
- assert.throws(()=>io.releaseLock('/workspace',{session:'one',run:'wrong'}),/ownership/);
- io.releaseLock('/workspace',owner);io.acquireLock('/workspace',{session:'two',run:'second'});
+ const owner={session:'one',run:'first'};owner.fence=io.acquireLock(d,owner);owner.fence=io.acquireLock(d,owner);
+ assert.throws(()=>io.acquireLock(d,{session:'two',run:'second'}),/owned/);
+ assert.throws(()=>io.releaseLock(d,{session:'one',run:'wrong'}),/ownership/);
+ io.releaseLock(d,owner);io.acquireLock(d,{session:'two',run:'second'});
 });
 test('native partial failure needs terminal proof and cannot masquerade as completion',t=>{
  const d=fixture(t),active={id:'r',dir:d,nativeSession:'s',agent:'delivery-coder',model:'test/code'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'partial',error:'provider unavailable',steps:[]}));assert.equal(readOutcome(active),null);
- writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:'r',state:'observed',instances:[{exitCode:0,signal:null}]}));assert.throws(()=>readOutcome(active),e=>e.closed===true && /partial/.test(e.message));
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify(terminalProof('r')));assert.throws(()=>readOutcome(active),e=>e.closed===true && /partial/.test(e.message));
  assert.throws(()=>readOutcome({...active,nativeSession:'foreign'}),/identity/);
 });
 test('workspace lease rejects a second process even for the same retained session/run',t=>{
  const d=fixture(t),old=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=d;t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
- io.acquireLock('/workspace',{session:'one',run:'same',pid:123});
- assert.throws(()=>io.acquireLock('/workspace',{session:'one',run:'same',pid:456}),/owned/);
+ io.acquireLock(d,{session:'one',run:'same',pid:123});
+ assert.throws(()=>io.acquireLock(d,{session:'one',run:'same',pid:456}),/owned/);
 });
 test('snapshot metadata cannot collide with a tracked or untracked source filename',t=>{
  const d=fixture(t);execFileSync('git',['init','-q',d]);writeFileSync(join(d,'$git-index'),'ordinary source');
@@ -103,14 +104,14 @@ test('expired terminal-proof wait stops with inspection guidance instead of poll
  const d=fixture(t),active={id:'r',dir:d,nativeSession:'s',agent:'delivery-coder',model:'test/code'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'complete',endedAt:Date.now()-120000,steps:[]}));
  assert.throws(()=>readOutcome(active),/terminal proof.*inspect/i);
- writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:'foreign',state:'observed',instances:[{exitCode:0,signal:null}]}));assert.throws(()=>readOutcome(active),/identity/i);
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify(terminalProof('foreign')));assert.throws(()=>readOutcome(active),/identity/i);
 });
 test('native outcome requires exact bound owner and run, never a parent UUID/path alternative',t=>{
  const d=fixture(t),active={id:'native-run',dir:d,session:'parent-uuid',nativeSession:join(d,'parent.jsonl'),agent:'delivery-coder',model:'test/code'};
  const status={runId:active.id,sessionId:active.nativeSession,state:'complete',steps:[{agent:active.agent,model:active.model,attemptedModels:[active.model],structuredOutputPath:join(d,'report.json')}]};
  const write=()=>writeFileSync(join(d,'status.json'),JSON.stringify(status));write();
  writeFileSync(join(d,'report.json'),JSON.stringify({status:'approved',summary:'Synthetic report',findings:[]}));
- writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:active.id,state:'observed',instances:[{exitCode:0,signal:null}]}));
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify(terminalProof(active.id)));
  assert.equal(readOutcome(active).status,'approved');
  for(const nativeSession of [undefined,null,'','   ',42])assert.throws(()=>readOutcome({...active,nativeSession}),/owner-session/);
  for(const sessionId of [active.session,join(d,'foreign.jsonl'),null]){status.sessionId=sessionId;write();assert.throws(()=>readOutcome(active),/owner-session/);}
