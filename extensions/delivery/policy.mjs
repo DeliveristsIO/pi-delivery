@@ -35,7 +35,7 @@ export function validatePlan(input) {
     if(task.files.some(p=>p.startsWith('/') || p.startsWith(':') || /[\\*?\[]/.test(p) || p.split('/').some(part=>['.','..','.git',''].includes(part))))throw new Error('Use literal repository-relative files or directories');
     if(plan.mode==='implementation' && !task.checks.length)throw new Error('Each implementation task needs executable checks');
     if(plan.mode==='review' && task.checks.length)throw new Error('Read-only review cannot execute shell checks');
-    if(/auth|bank|payment|secret|upload|dependenc|deploy|network|permission|package(-lock)?\.json|Gemfile|\.github/i.test(task.files.join('\n')))task.sensitive=true;
+    if(securitySensitive(task.files))task.sensitive=true;
   }
   if(plan.mode==='review' && plan.checks.length)throw new Error('Read-only review cannot execute shell checks; supply existing evidence in instructions');
   return plan;
@@ -56,9 +56,19 @@ export function validateRoutes(routes,available,roles=ROLES) {
 export function isApproval(text) {
   return /^(?:approved|approve(?: the (?:displayed )?plan)?|(?:please )?(?:implement|execute)(?: the| this)? (?:displayed |unchanged )?plan|go ahead)[.!]?$/i.test(text.trim());
 }
+export const securitySensitive=files=>/auth|bank|payment|secret|upload|dependenc|deploy|network|permission|package(-lock)?\.json|Gemfile|\.github/i.test(files.join('\n'));
 export const inScope=(path,files)=>files.some(file=>path===file || path.startsWith(file+'/'));
-export function assertUnchanged(before,after,files=[]) {
-  for(const path of new Set([...Object.keys(before),...Object.keys(after)]))if(!inScope(path,files) && before[path]!==after[path])throw new Error(`Workspace changed outside ${files.length?'approved task scope':'the approved snapshot'}: ${path}. Preserve edits and inspect; no rollback was attempted.`);
+const changedPaths=(before,after)=>[...new Set([...Object.keys(before),...Object.keys(after)])].filter(path=>before[path]!==after[path]).sort();
+export function assertUnchanged(before,after) {
+  const paths=changedPaths(before,after);
+  if(paths.length)throw new Error(`Workspace changed outside the approved snapshot: ${paths[0]}. Preserve edits and inspect; no rollback was attempted.`);
+}
+// File hints are not permissions. Product relevance is judged by independent review.
+export function assertCoderChanges(before,after) {
+  const paths=changedPaths(before,after);
+  if(paths.some(path=>path==='.git' || path.startsWith('.git/')))throw new Error('Coder changed Git metadata. Preserve edits and inspect; no rollback was attempted.');
+  assertScope(before,paths);assertScope(after,paths);
+  return paths;
 }
 export function assertScope(snapshot,files) {
   for(const [path,value] of Object.entries(snapshot))if(value.startsWith('symlink:') && (inScope(path,files) || files.some(file=>file.startsWith(path+'/'))))throw new Error(`Approved scope traverses an opaque symlink: ${path}. Resolve the dependency before approval.`);

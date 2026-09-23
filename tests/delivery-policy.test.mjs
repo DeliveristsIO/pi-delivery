@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {PLAN_SCHEMA,SCHEMAS,validate,validatePlan,validateReport,validateRoutes,isApproval,assertUnchanged} from '../extensions/delivery/policy.mjs';
+import {PLAN_SCHEMA,SCHEMAS,validate,validatePlan,validateReport,validateRoutes,isApproval,assertUnchanged,assertCoderChanges} from '../extensions/delivery/policy.mjs';
 const task={title:'One',instructions:'Implement',files:['a'],acceptance:['Works'],checks:['node --test']};
 const plan=()=>({mode:'implementation',title:'Change',tasks:[structuredClone(task)],checks:['node --test'],security:false});
 test('schema/runtime agree and removed engine fields are rejected, not silently ignored',()=>{
@@ -31,8 +31,16 @@ test('malformed or contradictory native reports never approve work',()=>{
  assert.equal(validateReport({status:'approved',summary:'source inspected; tests not run',findings:[]}).status,'approved');
 });
 test('snapshot checks preserve dirty unrelated files and detect review races and index changes',()=>{
- const before={a:'dirty','unrelated':'keep','$git-index':'staged'};
- assertUnchanged(before,{...before,a:'implemented'},['a']);
- for(const after of [{...before,unrelated:'lost'},{...before,'$git-index':'changed'},{...before,a:'race'}])assert.throws(()=>assertUnchanged(before,after));
- assert.throws(()=>assertUnchanged(before,{...before,ab:'outside'},['a']));
+ const before={a:'dirty','unrelated':'keep','.git/index':'staged'};
+ assert.deepEqual(assertCoderChanges(before,{...before,a:'implemented',related:'new'}),['a','related']);
+ for(const after of [{...before,unrelated:'lost'},{...before,'.git/index':'changed'},{...before,a:'race'}])assert.throws(()=>assertUnchanged(before,after));
+ assert.throws(()=>assertUnchanged(before,{...before,ab:'outside'}));
+});
+
+test('coder edits allow repository paths but never Git metadata or changed symlinks',()=>{
+ const before={a:'old','.git/index':'index','.git/HEAD':'head',link:'symlink:opaque'};
+ assert.deepEqual(assertCoderChanges(before,{...before,a:'new',related:'added'}),['a','related']);
+ for(const path of ['.git/index','.git/HEAD','link'])assert.throws(()=>assertCoderChanges(before,{...before,[path]:'changed'}));
+ assert.throws(()=>assertCoderChanges(before,{...before,related:'symlink:escape'}),/symlink/);
+ const removed={...before};delete removed.a;assert.deepEqual(assertCoderChanges(before,removed),['a']);
 });

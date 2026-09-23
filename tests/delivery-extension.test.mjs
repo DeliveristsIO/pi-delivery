@@ -15,7 +15,7 @@ function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,
  }};
  const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','write','subagent'],setActiveTools:()=>{},setModel:async()=>true};
  const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=> 'session'},modelRegistry:{getAvailable:()=>models}};
- const deps={child:false,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:()=>{},releaseLock:()=>{if(releaseError)throw new Error("Lock ownership changed");},readOutcome:()=>live?null:reports.shift()||approved,workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
+ const deps={child:false,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:()=>{},releaseLock:()=>{if(releaseError)throw new Error("Lock ownership changed");},readOutcome:()=>live?null:reports.shift()||approved,workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  registerDelivery(pi,{empty:{},plan:{},configure:{}},deps);
  const invoke=(name,args={})=>tools[name].execute('call',args,undefined,undefined,ctx);
  const input=text=>handlers.input({text,source:'interactive'},ctx);
@@ -156,4 +156,74 @@ test('large status evidence is bounded in text while full findings and outputs r
   assert.ok(text.length<=12000,`Report length ${text.length}`);assert.match(text,/quality: changes_requested/);assert.match(text,/Actionable latest review/);assert.match(text,/high: a:1/);assert.match(text,/check-9.*exit=1/);assert.match(text,/truncated|omitted/i);
  }
  assert.deepEqual(status.details.reports[0].report,finding);assert.equal(status.details.checks[0].output.length,40000);
+});
+
+test('unlisted related files reach reviews and status across corrections without more approval',async()=>{
+ const snapshot={a:'hash',unrelated:'dirty'};let round=0;
+ const finding={status:'changes_requested',summary:'Fix related view',findings:['high: views/item.erb:1 fix rendering']};
+ const h=harness({snapshot,reports:[approved,finding,approved,approved],onSave:s=>{
+  if(s.active?.stage==='coder' && s.active.id && round===s.round){snapshot[round===0?'lib/item.rb':'views/item.erb']='implemented';round++;}
+ }});
+ const s=await executePlan(h);assert.equal(s.stage,'complete',s.reason);
+ assert.deepEqual(s.changedPaths[0],['lib/item.rb','views/item.erb']);assert.equal(snapshot.unrelated,'dirty');
+ const reviews=h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-reviewer');
+ assert.match(reviews[0].params.task,/Actual changed paths.*lib\/item.rb/);
+ assert.match(reviews[1].params.task,/Actual changed paths.*lib\/item.rb.*views\/item.erb/);
+ assert.match(reviews[1].params.task,/Preexisting work.*dirty diff/s);
+ assert.match(textOf(await h.invoke('delivery_status')),/lib\/item.rb.*views\/item.erb/s);
+});
+test('resume accepts additional coder files and records them for independent review',async()=>{
+ const h=harness({live:true});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');await new Promise(r=>setTimeout(r,5));await h.handlers.session_shutdown({},h.ctx);
+ const resumed=harness({entries:h.saved,snapshot:{a:'hash',unrelated:'dirty','related.rb':'partial'}});await resumed.start();await resumed.commands.delivery.handler('resume',resumed.ctx);
+ const s=await resumed.wait();assert.equal(s.stage,'complete',s.reason);assert.deepEqual(s.changedPaths[0],['related.rb']);
+ assert.equal(resumed.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,0);
+});
+test('newly discovered sensitive files require the exact security route bound before execution',async()=>{
+ const snapshot={a:'hash'};
+ const h=harness({snapshot,onSave:s=>{if(s.active?.stage==='coder'&&s.active.id)snapshot['auth/session.rb']='fix';}});
+ const s=await executePlan(h);assert.equal(s.stage,'complete',s.reason);assert.equal(s.routes.security,'test/security');
+ const launches=h.calls.filter(c=>c.method==='spawn');assert.deepEqual(launches.map(c=>c.params.model),['test/coder','test/quality','test/security']);assert.match(launches[2].params.task,/Actual changed paths.*auth\/session.rb/);
+});
+test('implementation binds a configured security route even before sensitive paths are discovered',async()=>{
+ const h=harness();h.ctx.modelRegistry.getAvailable=()=>['planning','coder','quality'].map(id=>({provider:'test',id}));
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await assert.rejects(h.invoke('delivery_plan',plan()),/security/);assert.equal(h.calls.length,0);
+});
+for(const stage of ['coder','quality','check'])test(`${stage} cannot change Git metadata; reviewers and checks cannot edit any source`,async()=>{
+ for(const path of ['.git/index','.git/HEAD',...(stage==='coder'?[]:['related.rb'])]) {
+  const snapshot={a:'hash','.git/index':'index','.git/HEAD':'head'};let changed=false;
+  const h=harness({snapshot,onSave:s=>{if(!changed && (stage==='check'?s.pendingCheck:s.active?.stage===stage&&s.active.id)){snapshot[path]='mutated';changed=true;}}});
+  const s=await executePlan(h);assert.equal(s.stage,'blocked');assert.match(s.reason,/changed|metadata/);
+ }
+});
+test('coder cannot introduce an unlisted symlink',async()=>{
+ const snapshot={a:'hash'},h=harness({snapshot,onSave:s=>{if(s.active?.stage==='coder'&&s.active.id)snapshot.related='symlink:external';}});
+ const s=await executePlan(h);assert.equal(s.stage,'blocked');assert.match(s.reason,/symlink/);
+});
+test('task check correction fixes related files under original approval and bounded rounds',async()=>{
+ const snapshot={a:'hash'};let checks=0;
+ const h=harness({snapshot,checkCode:command=>command==='task-one'&&checks++===0?1:0,onSave:s=>{if(s.active?.stage==='coder'&&s.active.id&&s.round===1)snapshot['tests/related.test.rb']='fixed';}});
+ const s=await executePlan(h);assert.equal(s.stage,'complete',s.reason);assert.equal(s.round,1);assert.deepEqual(s.changedPaths[0],['tests/related.test.rb']);
+ assert.deepEqual(s.checks.map(c=>c.code),[1,0,0]);assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
+});
+test('sensitive paths discovered in a correction persist through later rounds even when reverted',async()=>{
+ const snapshot={a:'hash'};let written=false,reverted=false;
+ const finding={status:'changes_requested',summary:'Correct task behavior',findings:['high: a:1 correct behavior']};
+ const h=harness({snapshot,reports:[approved,finding,approved,approved,finding,approved,approved,approved],onSave:s=>{
+  if(s.active?.stage!=='coder'||!s.active.id)return;
+  if(s.round===1&&!written){snapshot['auth/session.rb']='fix';written=true;}
+  if(s.round===2&&!reverted){delete snapshot['auth/session.rb'];reverted=true;}
+ }});
+ const s=await executePlan(h);assert.equal(s.stage,'complete',s.reason);assert.deepEqual(s.changedPaths[0],['auth/session.rb']);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-coder','delivery-reviewer','delivery-coder','delivery-reviewer','delivery-security','delivery-coder','delivery-reviewer','delivery-security']);
+});
+test('final-check failure preserves evidence without guessing task attribution or replaying completed work',async()=>{
+ const h=harness({checkCode:command=>command==='final'?1:0});const s=await executePlan(h);
+ assert.equal(s.stage,'blocked');assert.match(s.reason,/automatic attribution.*unavailable/);assert.equal(s.round,0);
+ assert.deepEqual(s.checks.map(c=>c.code),[0,1]);assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);
+});
+test('newly required security never launches with a missing bound route in a retained worker',async()=>{
+ const h=harness({live:true});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');await new Promise(r=>setTimeout(r,5));await h.handlers.session_shutdown({},h.ctx);
+ const entry=h.saved.filter(e=>e.customType==='delivery-coordinator-v2').at(-1);delete entry.data.routes.security;
+ const resumed=harness({entries:h.saved,snapshot:{a:'hash',unrelated:'dirty','auth/session.rb':'fix'}});await resumed.start();await resumed.commands.delivery.handler('resume',resumed.ctx);
+ const s=await resumed.wait();assert.equal(s.stage,'blocked');assert.match(s.reason,/exact model route: security/);assert.ok(!resumed.calls.some(c=>c.method==='spawn'&&c.params.agent==='delivery-security'));
 });

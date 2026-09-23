@@ -18,3 +18,12 @@ test('dirty worktree evidence is bounded and snapshot detects changes without wr
  const before=snapshot(root);assert.match(workingTreeEvidence(root),/untracked/);assert.deepEqual(snapshot(root),before);
  writeFileSync(join(root,'untracked'),'changed');assert.notDeepEqual(snapshot(root),before);
 });
+test('worker profiles judge product intent, not file-list membership, and preserve preexisting work',()=>{
+ for(const name of ['coder','reviewer','security']) {
+  const profile=readFileSync(new URL(`../agents/delivery-${name}.md`,import.meta.url),'utf8');
+  assert.match(profile,/starting points.*not.*permission list/i);
+  assert.match(profile,/approved product task/i);assert.match(profile,/preexisting/i);
+ }
+ const coder=readFileSync(new URL('../agents/delivery-coder.md',import.meta.url),'utf8');
+ assert.match(coder,/without.*per-file approval/i);assert.match(coder,/task-related.*check failures/i);
+});

@@ -26,3 +26,9 @@ test('all runtime modules are explicitly packaged; removed modules are not refer
  assert.ok(!pkg.files.some(file=>/cleanup|merge\.mjs/.test(file)));
  for(const file of pkg.files)assert.ok(existsSync(resolve(root,file)),file);
 });
+test('public autonomy contract explains file hints, security binding and old-session restart',()=>{
+ for(const file of ['README.md','SECURITY.md','docs/configuration.md','skills/orchestrate-delivery/SKILL.md']) {
+  const text=readFileSync(resolve(root,file),'utf8');assert.match(text,/starting points/i);assert.match(text,/changed paths/i);
+  assert.match(text,/security route/i);assert.match(text,/fresh session/i);
+ }
+});
