@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync,mkdtempSync,copyFileSync,rmSync,writeFileSync} from 'node:fs';
+import {existsSync,mkdtempSync,copyFileSync,rmSync,writeFileSync,symlinkSync,readFileSync} from 'node:fs';
 import {homedir,tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -182,49 +182,76 @@ test('review prompts explicitly prohibit mutation despite implementation require
  }
  for(const c of h.calls.filter(c=>c.method==='spawn'&&c.params.agent!=='delivery-coder'))assert.match(c.params.task,/Read-only review\. Do not modify any files\./);
 });
-for(const choice of ['accept','new-policy','decline','workspace','config','shutdown'])test(`known security preflight recovery: ${choice}`,async()=>{
- const {h,allow}=await rejectedSecurity();const before=h.controller.state();allow();
- if(choice==='new-policy'){h.config.routes.security=routes.spec;h.config.timeouts={reviewMs:20*60000};}
- h.ctx.ui.confirm=async(_title,text)=>{if(choice==='new-policy'){assert.match(text,/custom\/s → custom\/r/);assert.match(text,/15 → 20/);}if(choice==='workspace')h.deps.fingerprint=()=> 'changed';if(choice==='config')h.config.routes.security=routes.spec;if(choice==='shutdown')await h.events.session_shutdown();return choice!=='decline';};
- const recovery=h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
- if(!['accept','new-policy'].includes(choice)) {await assert.rejects(recovery,/not approved|changed|reapproval/i);assert.deepEqual(h.controller.state(),before);return;}
- await recovery;await h.controller.settled();const after=h.controller.state();
- assert.equal(after.stage,'complete');assert.deepEqual(after.coding,before.coding);assert.equal(after.round,before.round);
- if(choice==='new-policy'){assert.equal(after.routes.security,routes.spec);assert.equal(after.timeouts.reviewMs,20*60000);}
- assert.deepEqual(after.reports.slice(0,before.reports.length),before.reports);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,2);
- assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-security').length,3);
+function readOnlyReservation(extra={}) {
+ return oldRunEntry('blocked',routes,{reason:securityPreflightError,round:0,active:{id:null,dir:null,model:routes.security,stage:'security',agent:'delivery-security',childIndex:0,budgetMs:60000,startedAt:1},coding:{0:{spentMs:1234,continuations:0}},checks:[{command:'node --test',code:0}],...extra});
+}
+test('known read-only preflight non-launch retries automatically once without confirmation or replay',async()=>{
+ const h=harness(),rpc=h.deps.rpc;let rejected=false;
+ h.deps.rpc=async(...args)=>{if(args[1]==='spawn' && args[2].agent==='delivery-security' && !rejected){rejected=true;h.calls.push({method:'spawn',params:args[2]});throw new Error(securityPreflightError);}return rpc(...args);};
+ h.ctx.ui.confirm=async()=>{throw new Error('Redundant confirmation');};
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Implement the fixture',source:'interactive'},h.ctx);
+ await h.tools.delivery_plan.execute('p',{...plan,executionIntent:{kind:'explicit-implementation',userTurn:'Implement the fixture'}},null,null,h.ctx);await h.controller.settled();
+ const state=h.controller.state();assert.equal(state.stage,'complete',state.reason);
+ assert.equal(state.readOnlyPreflightRetries['0:0:security'].count,1);
+ assert.equal(h.calls.filter(c=>c.method==='spawn' && c.params.agent==='delivery-coder').length,2,'one coder and one optimizer only');
+ assert.equal(state.reports.filter(r=>r.stage==='checks').length,1);
+ assert.equal(h.calls.filter(c=>c.method==='spawn' && c.params.agent==='delivery-security').length,3,'rejected task attempt, task retry, aggregate gate');
 });
-test('security preflight evidence survives two restarts without coder replay',async()=>{
+test('retained known preflight retries without UI, preserving prior reports, checks and budgets',async()=>{
+ const h=harness();h.entries.push(readOnlyReservation());h.ctx.hasUI=false;
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ const after=h.controller.state();assert.equal(after.stage,'complete',after.reason);assert.deepEqual(after.coding,before.coding);assert.equal(after.round,before.round);
+ assert.deepEqual(after.reports.slice(0,before.reports.length),before.reports);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security']);
+ assert.equal(h.calls.find(c=>c.method==='spawn').params.timeoutMs,60000);
+});
+test('repeated known preflight rejection exhausts a persisted marker across reloads',async()=>{
  const {h}=await rejectedSecurity();const original=h.controller.state();
+ assert.equal(original.readOnlyPreflightRetries['0:0:security'].count,1);
+ assert.match(original.reason,/preflight retry exhausted/i);
  let current=h;
  for(let i=0;i<2;i++) {
   const next=harness(structuredClone(h.config));next.entries.push(...structuredClone(current.entries));
   await next.events.session_start({},next.ctx);current=next;
-  assert.equal(current.controller.state().active.preflightRejection,securityPreflightError);
+  await assert.rejects(current.tools.delivery_resume.execute('r',{},null,null,current.ctx),/preflight retry exhausted/i);
+  assert.equal(current.calls.filter(c=>c.method==='spawn').length,0);
+  assert.deepEqual(current.controller.state().coding,original.coding);
+  assert.equal((await current.tools.delivery_status.execute()).details.nextAction.action,'inspect');
  }
- await current.tools.delivery_resume.execute('r',{},null,null,current.ctx);await current.controller.settled();
- assert.equal(current.controller.state().stage,'complete');assert.deepEqual(current.controller.state().coding,original.coding);
- assert.deepEqual(current.controller.state().reports.slice(0,original.reports.length),original.reports);
- assert.deepEqual(current.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security','delivery-reviewer','delivery-security']);
+});
+for(const change of ['workspace','routes','timeouts','fallbacks','branch','head','foreign-staging','foreign-owner','foreign-repository'])test(`preflight recovery refuses changed binding: ${change}`,async()=>{
+ const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']}),entry=readOnlyReservation();
+ if(change==='foreign-owner')entry.data.owner='other';
+ if(change==='foreign-repository')entry.data.workspace='/other';
+ if(['branch','head','foreign-staging'].includes(change))entry.data.gitPolicy={workingBranch:'feature/fixture',expectedHead:'hash'};
+ h.entries.push(entry);await h.events.session_start({},h.ctx);
+ if(change==='workspace')h.deps.fingerprint=()=> 'different';
+ if(change==='routes')h.config.routes.security=routes.spec;
+ if(change==='timeouts')h.config.timeouts={reviewMs:120000};
+ if(change==='fallbacks')h.config.fallbacks={security:[routes.spec]};
+ if(change==='branch')h.deps.branchState=()=>({branch:'foreign',head:'hash'});
+ if(change==='head')h.deps.branchState=()=>({branch:'feature/fixture',head:'foreign'});
+ if(change==='foreign-staging')h.deps.assertApprovedPaths=()=>{throw new Error('Foreign staging');};
+ h.ctx.ui.confirm=async()=>{throw new Error('No automatic material reapproval');};
+ await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/changed|reapproval|staging|No retained|No delivery|Activate delivery/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });
 for(const evidence of ['matching','missing','other-reservation','other-snapshot','newer-unknown-error'])test(`legacy overwritten preflight reason: ${evidence}`,async()=>{
- const {h}=await rejectedSecurity();const entries=structuredClone(h.entries);
- for(const e of entries)if(e.data?.active)delete e.data.active.preflightRejection;
- const current=structuredClone(entries.at(-1));current.data.reason='Retained child requires /delivery resume reconciliation';
- if(evidence==='other-reservation')for(const e of entries)if(e.data?.active)e.data.active.startedAt-=1;
- if(evidence==='other-snapshot')for(const e of entries)e.data.snapshot='different';
- if(evidence==='newer-unknown-error'){const newer=structuredClone(current);newer.data.reason='pi-subagents spawn timed out';entries.push(newer);}
- const next=harness(structuredClone(h.config));if(evidence!=='missing')next.entries.push(...entries);next.entries.push(current);
- await next.events.session_start({},next.ctx);
+ const prior=readOnlyReservation(),current=structuredClone(prior);current.data.reason='Retained child requires /delivery resume reconciliation';
+ if(evidence==='other-reservation')prior.data.active.startedAt-=1;
+ if(evidence==='other-snapshot')prior.data.snapshot='different';
+ const h=harness();if(evidence!=='missing')h.entries.push(prior);
+ if(evidence==='newer-unknown-error'){const newer=structuredClone(current);newer.data.reason='pi-subagents spawn timed out';h.entries.push(newer);}
+ h.entries.push(current);await h.events.session_start({},h.ctx);
  if(evidence!=='matching') {
-  next.ctx.ui.confirm=async()=>false;
-  await assert.rejects(next.tools.delivery_resume.execute('r',{},null,null,next.ctx),/not confirmed/i);
-  assert.equal(next.calls.filter(c=>c.method==='spawn').length,0);return;
+  h.ctx.ui.confirm=async()=>false;
+  await assert.rejects(h.tools.delivery_resume.execute('r',{},null,null,h.ctx),/not confirmed/i);
+  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);return;
  }
- assert.equal(next.controller.state().active.preflightRejection,securityPreflightError);
- await next.tools.delivery_resume.execute('r',{},null,null,next.ctx);await next.controller.settled();
- assert.equal(next.controller.state().stage,'complete');assert.deepEqual(next.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security','delivery-reviewer','delivery-security']);
+ assert.equal(h.controller.state().active.preflightRejection,securityPreflightError);
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-security']);
 });
 test('final correction exhaustion stops without proposing another plan',async()=>{
  const h=harness({version:1,routes,corrections:{maxFixRounds:4},repos:['/repo']});
@@ -992,10 +1019,7 @@ test('attached recovery review finding restores the complete retained task and f
  await h.events.session_start({},h.ctx);await h.events.input({text:'Run a recovery review of the retained Task 1 work',source:'interactive'},h.ctx);
  const review={title:'Quento Task 1 recovery review',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review retained Task 1',instructions:'Review the retained implementation only',files:['task-1.js'],acceptance:['Task 1 is correct']}],checks:[],risk:'low',security:false};
  await h.tools.delivery_plan.execute('review',review,null,null,h.ctx);await h.controller.settled();
- assert.equal(h.controller.state().stage,'blocked');assert.equal(h.calls.filter(call=>call.params?.agent==='delivery-coder').length,0,'read-only finding grants no corrective writer');
- const userTurn='Implement the explicitly reviewed Task 1 correction';await h.events.input({text:userTurn,source:'interactive'},h.ctx);
- const candidate={version:1,branch:'feature/quento',head:'hash',defaultBranch:'main',clean:false,status:' M task-1.js',inventory:['task-1.js'],staged:[],fingerprint:'retained-hash'};h.deps.correctionCandidate=()=>candidate;h.deps.assertCorrectionCandidate=()=>candidate;
- await h.tools.delivery_plan.execute('correct',{title:'Correct retained Task 1',mode:'implementation',changeType:'bug',reviewPolicy:'balanced',executionIntent:{kind:'explicit-implementation',userTurn},correctionAdoption:{kind:'retained-candidate',userTurn},tasks:[{title:'Correct Task 1',instructions:'Correct the retained finding',files:['task-1.js'],checks:['check-1'],acceptance:['Task 1 is correct'],sensitive:false}],checks:['final-gate'],risk:'low',security:false},null,null,h.ctx);await h.controller.settled();
+ // The attached review returns to existing implementation authority, not a new proposal.
  const state=h.controller.state(),spawns=h.calls.filter(call=>call.method==='spawn');
  assert.equal(state.stage,'complete',JSON.stringify({reason:state.reason,task:state.task,round:state.round,active:state.active,retained:Boolean(state.retainedRun)}));assert.equal(state.plan.title,'Quento');assert.equal(state.plan.tasks.length,5);assert.deepEqual(state.plan.checks,['final-gate']);
  assert.ok(state.coding[0].spentMs>=1234);assert.equal(state.retainedRun.state.coding[0].spentMs,1234);assert.deepEqual(state.connectionRetries['0:0:quality'],{count:1,spentMs:50});assert.equal(state.correctionPolicy.maxFixRounds,4);
@@ -1502,4 +1526,97 @@ test('aggregate review briefing includes committed range and current correction 
  h.deps.readOutcome=a=>{if(a.stage==='aggregate-quality'&&!requested){requested=true;return {status:'changes_requested',summary:'aggregate correction',findings:['fix']};}return {status:'approved',summary:'ok',findings:[]};};
  await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('p',{...plan,security:false},null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  const aggregates=h.calls.filter(c=>c.method==='spawn' && c.params?.task.includes('Independent aggregate-quality'));assert.equal(aggregates.length,2);const aggregate=aggregates.at(-1);assert.match(aggregate.params.task,/BOUND COMMITTED RANGE/);assert.match(aggregate.params.task,/CURRENT_CORRECTION_MARKER/);assert.match(aggregate.params.task,/BOUND CURRENT WORKING-TREE CORRECTION/);
+});
+
+test('parent shell denial points to controlled inspection without admitting shell syntax',async()=>{
+ const h=harness();h.deps.inspectRepository=(_root,view,offset)=>`${view}:${offset}`;
+ await h.events.session_start({},h.ctx);const before=h.controller.state();
+ for(const command of ['git status','git -c alias.x=!id x','echo $(id)','cat a > b']) {
+  const blocked=await h.events.tool_call({toolName:'bash',input:{command}},h.ctx);
+  assert.equal(blocked.block,true);assert.match(blocked.reason,/delivery_inspect/);assert.match(blocked.reason,/read.*grep.*find.*ls/);
+ }
+ assert.equal(await h.events.tool_call({toolName:'delivery_inspect',input:{view:'history'}},h.ctx),undefined);
+ assert.equal((await h.tools.delivery_inspect.execute('i',{view:'history',offset:5},null,null,h.ctx)).content[0].text,'history:5');
+ assert.deepEqual(h.controller.state(),before);assert.equal(h.calls.length,0);
+});
+
+test('bare delivery resumes a known read-only non-launch without another confirmation',async()=>{
+ const h=harness();h.entries.push(readOnlyReservation());await h.events.session_start({},h.ctx);
+ h.ctx.ui.confirm=async()=>{throw new Error('Unexpected confirmation');};
+ await h.commands.delivery.handler('',h.ctx);await h.controller.settled();assert.equal(h.controller.state().stage,'complete');
+});
+for(const boundary of ['rounds','coding-time','branch','head','staging','scope','snapshot','foreign-session','foreign-repository','fallbacks'])test(`attached dirty-candidate recovery preserves boundary: ${boundary}`,async()=>{
+ const h=harness({version:1,routes:structuredClone(routes),repos:['/repo']}),entry=oldRunEntry('blocked',routes,{
+  plan:{...plan,mode:'implementation'},round:0,correctionPolicy:{maxFixRounds:4,source:'default'},reason:'Child failed-review failed; attempt closed. infrastructure failed',
+  failedRun:{id:'failed-review',stage:'quality',state:'failed',task:0,round:0,model:routes.quality,error:'infrastructure failed'},
+  coding:{0:{spentMs:17,continuations:0}},gitPolicy:{workingBranch:'feature/fixture',expectedHead:'hash',reviewPolicy:'balanced',commits:[]}
+ });
+ if(boundary==='rounds'){entry.data.round=4;entry.data.failedRun.round=4;}
+ if(boundary==='coding-time')entry.data.coding[0].spentMs=3600000;
+ h.entries.push(entry);await h.events.session_start({},h.ctx);
+ if(boundary==='fallbacks')h.config.fallbacks={quality:[routes.spec===routes.quality?routes.coder:routes.spec]};
+ let reviewed=false;h.deps.readOutcome=()=>{
+  if(!reviewed) {
+   reviewed=true;
+   if(boundary==='branch')h.deps.branchState=()=>({branch:'other',head:'hash'});
+   if(boundary==='head')h.deps.branchState=()=>({branch:'feature/fixture',head:'other'});
+   if(['staging','scope'].includes(boundary))h.deps.assertApprovedPaths=()=>{throw new Error('Foreign '+boundary);};
+   if(boundary==='snapshot')h.deps.fingerprint=()=> 'changed';
+   if(boundary==='foreign-session')h.ctx.sessionManager.getSessionId=()=> 'other';
+   if(boundary==='foreign-repository')h.ctx.cwd='/other'; // Bound record is tested below via a reload fixture.
+  }
+  return {status:'changes_requested',summary:'defect',findings:['high a:1 incorrect behavior; fix it']};
+ };
+ if(boundary==='foreign-repository') {
+  const foreign=structuredClone(entry);foreign.data.workspace='/other';const next=harness();next.entries.push(foreign);await next.events.session_start({},next.ctx);
+  assert.equal(next.controller.state().plan,null);assert.equal(next.calls.length,0);return;
+ }
+ await h.events.input({text:'Review the retained task and continue its approved lifecycle',source:'interactive'},h.ctx);
+ const recovery={title:'Recovery',mode:'review',reviewAttachment:{kind:'retained-recovery'},tasks:[{title:'Review',instructions:'Inspect original acceptance',files:['a'],acceptance:['correct']}],checks:[],risk:'low',security:false};
+ if(boundary==='fallbacks')await assert.rejects(h.tools.delivery_plan.execute('r',recovery,null,null,h.ctx),/bindings changed|fallback/i);
+ else {await h.tools.delivery_plan.execute('r',recovery,null,null,h.ctx);await h.controller.settled();assert.equal(h.controller.state().stage,'blocked');}
+ assert.equal(h.calls.filter(c=>c.method==='spawn' && c.params.agent==='delivery-coder').length,0);
+ assert.equal(h.controller.state().retainedRun?.state.coding[0].spentMs ?? entry.data.coding[0].spentMs,entry.data.coding[0].spentMs);
+});
+test('unrelated broken and external symlinks warn while actual fingerprints permit checks and review',async(t)=>{
+ const dir=mkdtempSync(join(tmpdir(),'delivery-links-')),outside=mkdtempSync(join(tmpdir(),'delivery-target-'));
+ t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(outside,{recursive:true,force:true});});
+ execFileSync('git',['init','-q',dir]);writeFileSync(join(dir,'a'),'source');writeFileSync(join(outside,'target'),'private external contents');
+ symlinkSync('missing',join(dir,'broken'));symlinkSync(join(outside,'target'),join(dir,'external'));
+ const h=harness();h.deps.fingerprint=(_root,options)=>fingerprint(dir,options);let checks=0;
+ h.deps.verifyCommand=async()=>{checks++;return {command:'node --test',code:0,output:'PASS'};};
+ await h.events.session_start({},h.ctx);await h.events.input({text:'Review a only',source:'interactive'},h.ctx);
+ await h.tools.delivery_plan.execute('r',{...plan,mode:'review',changeType:undefined,tasks:[{...plan.tasks[0],checks:undefined}]},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete',h.controller.state().reason);assert.equal(h.controller.state().coverageWarnings.length,2);assert.ok(checks>0);
+ assert.ok(h.calls.some(c=>c.params?.agent==='delivery-reviewer'));assert.equal(readFileSync(join(outside,'target'),'utf8'),'private external contents');
+ assert.equal(existsSync(join(dir,'broken')),false,'broken link was not repaired');
+ const before=fingerprint(dir);writeFileSync(join(outside,'target'),'changed outside');assert.equal(fingerprint(dir),before,'target contents are not followed');
+});
+test('visible status summarizes check outcomes and keeps verbose evidence in tool details',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{reason:'Review evidence unavailable\n'+'details '.repeat(2000),checks:[{command:'node --test',code:1,output:'VERBOSE_CHECK_OUTPUT_'.repeat(2000)}]}));
+ await h.events.session_start({},h.ctx);const status=await h.tools.delivery_status.execute();
+ assert.ok(status.content[0].text.length<2500);assert.doesNotMatch(status.content[0].text,/VERBOSE_CHECK_OUTPUT/);
+ assert.match(status.content[0].text,/node --test/);assert.match(status.details.checks[0].output,/VERBOSE_CHECK_OUTPUT/);assert.match(status.details.reason,/details/);
+});
+for(const change of ['unchanged','foreign-owner','foreign-repository','stale-round','changed-snapshot','changed-plan','changed-budget','changed-blocker','missing-attachment'])test(`legacy attached finding resumes only proven original dirty lifecycle: ${change}`,async()=>{
+ const source=oldRunEntry('blocked',routes,{plan:{...plan,mode:'implementation'},round:0,correctionPolicy:{maxFixRounds:4,source:'default'},reason:'Child review failed; attempt closed. infrastructure failed',failedRun:{id:'review',state:'failed',stage:'quality',task:0,round:0,model:routes.quality,error:'infrastructure failed'},coding:{0:{spentMs:1234,continuations:0}},gitPolicy:{changeType:'feature',workingBranch:'feature/fixture',expectedHead:'hash',baseHead:'hash',reviewPolicy:'balanced',commits:[]}}).data;
+ const attachment={version:1,status:'changes_requested',stage:'quality',candidateFingerprint:'hash',reviewCandidateFingerprint:'hash',reviewPlan:{mode:'review',tasks:[{files:['a']}]},checks:[]};
+ const report={stage:'quality',task:0,round:0,snapshot:'hash',runId:'recovery-review',report:{status:'changes_requested',summary:'attached defect',findings:['high a:1 incorrect behavior; fix it']},reviewAttachment:attachment};
+ const retained={version:1,session:'session',repository:'/repo',candidateFingerprint:'hash',reviewCandidateFingerprint:'hash',reviewFiles:['a'],state:structuredClone(source)};
+ const entry={type:'custom',customType:'delivery-mode-v1',data:{...source,failedRun:undefined,correctionReviewPending:true,retainedRun:retained,reviewAttachment:null,reviewAttachments:[attachment],reports:[...source.reports,report],reason:'Read-only retained review found issues; corrective writes require an explicit correctionAdoption implementation plan.'}};
+ if(change==='foreign-owner')retained.session='other';
+ if(change==='foreign-repository')retained.repository='/other';
+ if(change==='stale-round')entry.data.round=1;
+ if(change==='changed-plan')entry.data.plan={...source.plan,title:'new scope'};
+ if(change==='changed-budget')entry.data.coding={0:{spentMs:0,continuations:0}};
+ if(change==='changed-blocker')entry.data.reason='Unrelated later failure';
+ if(change==='missing-attachment')delete report.reviewAttachment;
+ const h=harness();h.entries.push(entry);if(change==='changed-snapshot')h.deps.fingerprint=()=> 'changed';
+ await h.events.session_start({},h.ctx);h.ctx.ui.confirm=async()=>{throw new Error('No repeated approval');};
+ const response=h.tools.delivery_resume.execute('r',{},null,null,h.ctx);
+ if(change!=='unchanged') {await assert.rejects(response,/lineage|binding|changed|proven|attachment/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);return;}
+ await response;await h.controller.settled();assert.equal(h.controller.state().stage,'complete',h.controller.state().reason);
+ assert.equal(h.controller.state().round,1);assert.ok(h.controller.state().coding[0].spentMs>=1234);
+ assert.equal(h.controller.state().reports.filter(r=>r.runId==='recovery-review').length,1);assert.equal(h.controller.state().correctionReviewPending,undefined);
+ assert.match(h.calls.find(c=>c.params?.agent==='delivery-coder').params.task,/attached defect/);
 });

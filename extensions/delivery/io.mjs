@@ -29,6 +29,26 @@ function git(root,args) {
   return execFileSync('git',['-c','core.fsmonitor=false','-C',root,...args],{encoding:'utf8',timeout:15000,maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});
 }
 export function repoRoot(cwd) {return realpathSync(git(cwd,['rev-parse','--show-toplevel']).trim());}
+// Fixed argv only: no shell, arbitrary flags, aliases, pager, signatures,
+// external diff/textconv, fsmonitor hooks or optional index writes.
+export function inspectRepository(root,view='status',offset=0) {
+  if(!['status','history'].includes(view))throw new Error('Invalid inspection view; use status or history.');
+  if(!Number.isSafeInteger(offset) || offset<0)throw new Error('Invalid inspection offset.');
+  if(view==='status') {
+    // Status may run clean/process drivers even with optional locks disabled.
+    // Query effective config (including includes) without invoking any driver.
+    let filters='';
+    try {filters=execFileSync('git',['-C',root,'config','--null','--name-only','--get-regexp','^filter\\..*\\.(clean|process)$'],{encoding:'utf8',timeout:15000,maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});}
+    catch(error) {if(error.status!==1)throw error;}
+    if(filters)throw new Error('Status inspection cannot safely run with configured Git filters; use history inspection or read source files directly.');
+  }
+  const args=view==='status'
+    ? ['status','--short','--branch','--untracked-files=all','--ignore-submodules=all']
+    : ['log','-20','--no-show-signature','--no-decorate','--format=%h %s'];
+  const output=execFileSync('git',['--no-pager','--no-optional-locks','--no-replace-objects','-c','core.fsmonitor=false','-c','core.untrackedCache=false','-c','core.quotePath=true','-C',root,...args],{encoding:'utf8',timeout:15000,maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});
+  const page=output.slice(offset,offset+40000);
+  return output.length>offset+40000 ? page+`\n[Inspection truncated; continue delivery_inspect view=${view} offset=${offset+40000}.]` : page;
+}
 export function readPlan(root,path) {
   root=realpathSync(root);
   if(typeof path!=='string' || path.includes('\0'))throw new Error('Invalid plan path');

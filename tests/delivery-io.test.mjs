@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,rmSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,rmSync,utimesSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {loadConfig,saveConfig,fingerprint,repoRoot,readOutcome,correctionCandidate,assertCorrectionCandidate} from '../extensions/delivery/io.mjs';
+import * as io from '../extensions/delivery/io.mjs';
+const inspectRepository=(...args)=>io.inspectRepository(...args);
 import {rpc} from '../extensions/delivery/rpc.mjs';
 function fixture(t) {const d=mkdtempSync(join(tmpdir(),'delivery-test-'));t.after(()=>rmSync(d,{recursive:true,force:true}));return d;}
 test('config default, atomic roundtrip, malformed input and symlink refusal', t=>{
@@ -51,4 +53,39 @@ test('correction candidate rejects out-of-scope work, foreign staging and symlin
  writeFileSync(join(d,'a'),'candidate\n');writeFileSync(join(d,'outside'),'foreign\n');assert.throws(()=>correctionCandidate(d,['a']),/outside|scope/i);
  execFileSync('git',['-C',d,'restore','outside']);execFileSync('git',['-C',d,'add','a']);assert.throws(()=>correctionCandidate(d,['a'],{allowStaged:false}),/staged/i);
  execFileSync('git',['-C',d,'restore','--staged','a']);rmSync(join(d,'a'));symlinkSync('/etc/passwd',join(d,'a'));assert.throws(()=>correctionCandidate(d,['a']),/symlink/i);
+});
+
+test('controlled inspection uses fixed read-only Git operations, not aliases, hooks or shell',t=>{
+ const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args]);git('init','-q','-b','main');
+ writeFileSync(join(d,'a'),'base\n');git('add','a');git('-c','user.name=T','-c','user.email=t@x','commit','-qm','base');
+ const marker=join(d,'executed');
+ for(const key of ['core.fsmonitor','core.pager','alias.status','alias.log'])git('config',key,`!touch ${marker}`);
+ git('config','log.showSignature','true');git('config','gpg.program',marker);
+ const before=readFileSync(join(d,'.git/index'));
+ writeFileSync(join(d,'a'),'dirty\n');symlinkSync('/not/a/real/target',join(d,'external'));
+ assert.match(inspectRepository(d,'status'),/a/);assert.match(inspectRepository(d,'status'),/external/);
+ assert.match(inspectRepository(d,'history'),/base/);assert.deepEqual(readFileSync(join(d,'.git/index')),before);
+ assert.throws(()=>readFileSync(marker),/ENOENT/);
+ for(const view of ['status; touch executed','$(touch executed)','status > executed','-c alias.x=!id','diff','config',null])assert.throws(()=>inspectRepository(d,view),/inspection view/i);
+ for(const offset of [-1,1.5,'0'])assert.throws(()=>inspectRepository(d,'status',offset),/offset/i);
+});
+test('controlled status refuses clean and process filters without executing them',t=>{
+ for(const kind of ['clean','process']) {
+  const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args]);git('init','-q','-b','main');
+  writeFileSync(join(d,'.gitattributes'),'a filter=probe\n');writeFileSync(join(d,'a'),'initial\n');
+  git('add','.');git('-c','user.name=T','-c','user.email=t@x','commit','-qm','base');
+  const marker=join(d,'executed'),index=readFileSync(join(d,'.git/index'));
+  git('config',`filter.probe.${kind}`,`touch '${marker}'; cat`);
+  writeFileSync(join(d,'a'),'changed\n');const later=new Date(Date.now()+5000);utimesSync(join(d,'a'),later,later);
+  assert.throws(()=>inspectRepository(d,'status'),/configured Git filters.*history/i);
+  assert.match(inspectRepository(d,'history'),/base/);
+  assert.throws(()=>readFileSync(marker),/ENOENT/);assert.deepEqual(readFileSync(join(d,'.git/index')),index);
+ }
+});
+test('controlled inspection paginates bounded output',t=>{
+ const d=fixture(t);execFileSync('git',['init','-q',d]);
+ for(let i=0;i<600;i++)writeFileSync(join(d,String(i).padStart(3,'0')+'-'.repeat(80)),'');
+ const first=inspectRepository(d,'status'),next=inspectRepository(d,'status',40000);
+ assert.match(first,/truncated.*offset=40000/i);assert.ok(first.length<40200);
+ assert.match(next,/599/);assert.notEqual(first,next);
 });
