@@ -116,7 +116,8 @@ export function releaseLock(root,owner) {
 }
 export function readOutcome(active) {
   const status=jsonFile(join(active.dir,'status.json'));
-  if(status.runId!==active.id || status.sessionId!==active.session)throw new Error('Native worker identity/session mismatch');
+  if(status.runId!==active.id)throw new Error('Native worker run-ID identity mismatch');
+  if(typeof active.nativeSession!=='string' || !active.nativeSession.trim() || status.sessionId!==active.nativeSession)throw new Error('Native worker owner-session identity mismatch');
   if(!['complete','failed','partial','stopped','paused','blocked','rejected'].includes(status.state))return null;
   const path=join(active.dir,'process-terminal.json');
   const terminal=existsSync(path)?jsonFile(path):null;

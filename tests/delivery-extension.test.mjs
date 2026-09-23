@@ -2,20 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {registerDelivery} from '../extensions/delivery/extension.mjs';
 import {rpc} from '../extensions/delivery/rpc.mjs';
+import {readOutcome} from '../extensions/delivery/io.mjs';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 
 const plan=()=>({mode:'implementation',title:'Bounded change',tasks:[{title:'One',instructions:'Implement one',files:['a'],acceptance:['Works'],checks:['task-one']}],checks:['final'],security:false});
 const approved={status:'approved',summary:'Inspected source and evidence',findings:[]};
-function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0}={}) {
+function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{}}={}) {
  const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries];let n=0;
  const models=['planning','coder','quality','security'].map(id=>({provider:'test',id}));
  const events={listeners:new Map(),on(k,f){this.listeners.set(k,f);return()=>this.listeners.delete(k);},emit(k,r){if(!k.endsWith(':request'))return;calls.push(r);let data={version:1,capabilities:{asyncSpawn:true,processTerminalProof:{version:1}},methods:['spawn','status','stop']};
- if(r.method==='spawn')data={details:{runId:`run-${++n}`,asyncDir:`/artifacts/${n}`}};
+ if(r.method==='spawn')data={details:spawn?spawn(r.params,++n):{runId:`run-${++n}`,asyncDir:`/artifacts/${n}`}};
  if(r.method==='status')data={fleet:{totalActive:0}};
  const reply=()=>this.listeners.get(`subagents:rpc:v1:reply:${r.requestId}`)({version:1,requestId:r.requestId,success:!(spawnError&&r.method==='spawn'),data,error:{message:'Provider unavailable'}});if(r.method==='ping'&&delayPing)setTimeout(reply,delayPing);else reply();
  }};
  const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','write','subagent'],setActiveTools:()=>{},setModel:async()=>true};
- const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=> 'session'},modelRegistry:{getAvailable:()=>models}};
- const deps={child:false,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:()=>{},releaseLock:()=>{if(releaseError)throw new Error("Lock ownership changed");},readOutcome:()=>live?null:reports.shift()||approved,workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
+ const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
+ const deps={child:false,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  registerDelivery(pi,{empty:{},plan:{},configure:{}},deps);
  const invoke=(name,args={})=>tools[name].execute('call',args,undefined,undefined,ctx);
  const input=text=>handlers.input({text,source:'interactive'},ctx);
@@ -226,4 +230,112 @@ test('newly required security never launches with a missing bound route in a ret
  const entry=h.saved.filter(e=>e.customType==='delivery-coordinator-v2').at(-1);delete entry.data.routes.security;
  const resumed=harness({entries:h.saved,snapshot:{a:'hash',unrelated:'dirty','auth/session.rb':'fix'}});await resumed.start();await resumed.commands.delivery.handler('resume',resumed.ctx);
  const s=await resumed.wait();assert.equal(s.stage,'blocked');assert.match(s.reason,/exact model route: security/);assert.ok(!resumed.calls.some(c=>c.method==='spawn'&&c.params.agent==='delivery-security'));
+});
+
+const parentUUID='37ea2a5e-f069-4e6a-9b1f-a08d309df5e7';
+function nativeArtifacts(t,{sessionFile=join(tmpdir(),'delivery-parent.jsonl'),sessionId=parentUUID,live=false}={}) {
+ const dir=mkdtempSync(join(tmpdir(),'delivery-owner-test-')),workers=[];
+ t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ function write(worker,patch={}) {
+  Object.assign(worker.status,patch);writeFileSync(join(worker.dir,'status.json'),JSON.stringify(worker.status));
+ }
+ return {sessionFile,sessionId,readOutcome,workers,write,spawn(params){
+  const n=workers.length+1,asyncDir=join(dir,String(n));mkdirSync(asyncDir);
+  const runId=`native-${n}`,report=join(asyncDir,'report.json');
+  const worker={dir:asyncDir,status:{runId,sessionId:sessionFile ?? sessionId,state:live&&workers.length===0?'running':'complete',steps:[{agent:params.agent,model:params.model,attemptedModels:[params.model],sessionFile:join(asyncDir,'child.jsonl'),structuredOutputPath:report}]}};
+  workers.push(worker);write(worker);
+  writeFileSync(report,JSON.stringify(approved));
+  writeFileSync(join(asyncDir,'process-terminal.json'),JSON.stringify({runId,state:'observed',instances:[{exitCode:0,signal:null}]}));
+  return {runId,asyncDir};
+ }};
+}
+test('persisted native owner path completes through real readOutcome while journal and lock retain parent UUID',async t=>{
+ const native=nativeArtifacts(t),locks=[];
+ const h=harness({...native,onLock:(_method,_root,owner)=>locks.push(owner.session),onSave:s=>{if(s.active)assert.equal(s.active.nativeSession,native.sessionFile);}});
+ const s=await executePlan(h);
+ assert.equal(s.stage,'complete',s.reason);
+ assert.equal(s.session,parentUUID);assert.ok(locks.length);assert.ok(locks.every(session=>session===parentUUID));
+ assert.ok(s.reports.every(r=>r.native.nativeSession===native.sessionFile));
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,2);
+});
+for(const sessionFile of [null,undefined])test(`nonpersisted native owner falls back to parent UUID (${sessionFile})`,async t=>{
+ const native=nativeArtifacts(t,{sessionFile:null});native.sessionFile=sessionFile;
+ const h=harness(native),s=await executePlan(h);
+ assert.equal(s.stage,'complete',s.reason);assert.ok(s.reports.every(r=>r.native.nativeSession===parentUUID));
+});
+for(const sessionFile of ['', '   ',42])test(`invalid native owner is rejected before spawn (${JSON.stringify(sessionFile)})`,async t=>{
+ const h=harness(nativeArtifacts(t,{sessionFile})),s=await executePlan(h);
+ assert.equal(s.stage,'blocked');assert.match(s.reason,/session.*identity|owner.*session/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
+async function retainedNativeWorker(t,{old=false,sessionFile}={}) {
+ const native=nativeArtifacts(t,{live:true,...(sessionFile===undefined?{}:{sessionFile})}),h=harness(native);
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ await new Promise(r=>setTimeout(r,5));await h.handlers.session_shutdown({},h.ctx);
+ const retained=structuredClone(h.state());retained.stage='blocked';retained.reason='Retained worker awaiting monitoring';
+ if(old)delete retained.active.nativeSession;
+ return {native,retained,entries:[{type:'custom',customType:'delivery-coordinator-v2',data:retained}]};
+}
+for(const old of [false,true])test(`${old?'old UUID-bound v2':'current path-bound'} worker reload consumes original worker without duplicate coding or checks`,async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{old});
+ native.write(native.workers[0],{state:'complete'});
+ const original=structuredClone(retained.active),h=harness({...native,entries});await h.start();
+ assert.equal(h.calls.length,0);await h.commands.delivery.handler('resume',h.ctx);
+ const s=await h.wait();assert.equal(s.stage,'complete',s.reason);
+ assert.equal(s.reports[0].native.id,original.id);assert.equal(s.reports[0].native.dir,original.dir);
+ assert.equal(s.reports[0].native.nativeSession,native.sessionFile);assert.equal(s.session,parentUUID);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-reviewer']);
+ assert.deepEqual(s.checks.map(c=>c.command),['task-one','final']);
+});
+for(const old of [false,true])test(`${old?'old v2':'current'} worker stop/resume observes closure without replacement`,async t=>{
+ const {native,entries}=await retainedNativeWorker(t,{old}),h=harness({...native,entries});await h.start();
+ await h.commands.delivery.handler('stop',h.ctx);native.write(native.workers[0],{state:'stopped'});
+ await h.commands.delivery.handler('resume',h.ctx);const s=await h.wait();assert.equal(s.stage,'stopped',s.reason);
+ assert.equal(s.active,null);assert.equal(s.checks.length,0);assert.equal(s.reports.length,0);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);assert.equal(h.calls.filter(c=>c.method==='stop').length,1);
+});
+for(const patch of [{sessionId:'/foreign/parent.jsonl'},{sessionId:parentUUID},{runId:'foreign-run'}])test(`old v2 binding does not trust returned identity ${JSON.stringify(patch)}`,async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{old:true});native.write(native.workers[0],{state:'complete',...patch});
+ const h=harness({...native,entries});await h.start();await h.commands.delivery.handler('resume',h.ctx);const s=await h.wait();
+ assert.equal(s.stage,'blocked');assert.match(s.reason,patch.runId?/run-ID/:/owner-session/);
+ assert.equal(s.active.id,retained.active.id);assert.equal(s.active.dir,retained.active.dir);assert.equal(s.active.nativeSession,native.sessionFile);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);assert.equal(s.checks.length,0);
+ await assert.rejects(h.invoke('delivery_plan',plan()),/live|unresolved/);
+});
+for(const patch of [{session:'foreign-uuid'},{root:'/foreign-repository'},{session:undefined},{root:undefined}])test(`old v2 normalization requires verified parent UUID and repository ${JSON.stringify(patch)}`,async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{old:true});Object.assign(retained,patch);
+ const h=harness({...native,entries});await h.start();await assert.rejects(h.commands.delivery.handler('resume',h.ctx),/legacy|unsupported|owner|session|repository/i);
+ assert.equal(h.calls.length,0);assert.equal(retained.active.nativeSession,undefined);
+});
+for(const patch of [{session:'foreign-uuid'},{nativeSession:'/foreign/parent.jsonl'},{nativeSession:''},{dir:null}])test(`retained worker cannot be rebound from ambiguous binding ${JSON.stringify(patch)}`,async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{old:true});Object.assign(retained.active,patch);
+ const h=harness({...native,entries});await h.start();await assert.rejects(h.commands.delivery.handler('resume',h.ctx),/owner|session|identity/i);
+ assert.equal(h.calls.length,0);
+});
+test('new nonpersisted binding is not normalized when a session file later appears',async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{sessionFile:null});
+ const h=harness({...native,entries,sessionFile:'/new/parent.jsonl'});await h.start();
+ await assert.rejects(h.commands.delivery.handler('resume',h.ctx),/owner.session/i);assert.equal(h.calls.length,0);
+ assert.equal(retained.active.nativeSession,parentUUID);
+});
+test('retained v2 quality worker normalization never replays finished coding or task checks',async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{old:true});
+ retained.active.stage='quality';retained.active.agent='delivery-reviewer';retained.active.model='test/quality';
+ retained.reports=[{task:0,round:0,stage:'coder',native:{id:'finished-coder'},report:approved}];
+ retained.checks=[{task:0,round:0,command:'task-one',code:0,processClosed:true,output:'Retained passing check'}];
+ const worker=native.workers[0];native.write(worker,{state:'complete',steps:[{...worker.status.steps[0],agent:'delivery-reviewer',model:'test/quality',attemptedModels:['test/quality']}]});
+ const h=harness({...native,entries});await h.start();await h.commands.delivery.handler('resume',h.ctx);const s=await h.wait();
+ assert.equal(s.stage,'complete',s.reason);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ assert.deepEqual(s.reports.map(r=>r.stage),['coder','quality']);assert.deepEqual(s.checks.map(c=>c.command),['task-one','final']);
+ assert.equal(s.checks[0].output,'Retained passing check');assert.equal(s.reports[1].native.id,retained.active.id);
+});
+test('retained nonpersisted v2 worker binds the same UUID and observes stopped closure',async t=>{
+ const {native,retained,entries}=await retainedNativeWorker(t,{old:true,sessionFile:null});retained.stopping=true;
+ native.write(native.workers[0],{state:'stopped'});
+ const h=harness({...native,entries});await h.start();await h.commands.delivery.handler('resume',h.ctx);
+ assert.equal((await h.wait()).stage,'stopped');assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ assert.ok(h.saved.some(e=>e.data?.active?.nativeSession===parentUUID));
+});
+test('nonpersisted missing parent identity cannot launch',async t=>{
+ const h=harness(nativeArtifacts(t,{sessionFile:null,sessionId:''})),s=await executePlan(h);
+ assert.equal(s.stage,'blocked');assert.match(s.reason,/session.*ownership|identity/);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
 });

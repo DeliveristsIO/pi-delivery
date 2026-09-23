@@ -19,6 +19,21 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   const available=()=>ctx.modelRegistry.getAvailable();
   const config=()=>d.loadConfig(d.configPath());
   const owner=()=>({session:state.session,run:state.run,pid:process.pid});
+  function nativeOwnerSession() {
+    if(typeof state.session!=='string' || !state.session.trim() || state.session!==ctx.sessionManager.getSessionId() || state.root!==root || root!==d.repoRoot(ctx.cwd))throw new Error('Parent session/repository ownership is unverified; inspect retained worker identity.');
+    // pi-subagents resolveCurrentSessionId prefers the session file; locks keep the Pi UUID.
+    const session=ctx.sessionManager.getSessionFile?.() ?? ctx.sessionManager.getSessionId();
+    if(typeof session!=='string' || !session.trim())throw new Error('Native owner-session identity is unavailable; inspect the current session.');
+    return session;
+  }
+  function bindActiveNativeSession() {
+    const session=nativeOwnerSession(),active=state.active;
+    if(active.session!==state.session || typeof active.id!=='string' || !active.id.trim() || typeof active.dir!=='string' || !active.dir.trim())throw new Error('Retained native worker ownership/identity is unverified; inspect without launching a replacement.');
+    // Only old v2 reservations lack nativeSession. Normalize from verified parent
+    // context, never from returned status; preserve the known worker and its stage.
+    if(state.version===2 && !Object.hasOwn(active,'nativeSession')){active.nativeSession=session;save();}
+    if(active.nativeSession!==session)throw new Error('Native worker owner-session mismatch with current session; retained binding unchanged.');
+  }
   const display=text=>pi.sendMessage({customType:'delivery',content:text,display:true});
   const status=()=>`Delivery ${state.enabled?'ON':'OFF'} · ${state.stage}${state.plan?` · task ${state.task+1}/${state.plan.tasks.length}`:''}${state.active?` · native ${state.active.id || 'launch unresolved'}`:''}${state.reason?' · '+state.reason:''}`;
   function evidenceText() {
@@ -136,7 +151,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
           validateRoutes(state.routes,available().map(id),[state.stage]);
           const task=briefing();
           // Persist reservation BEFORE sending spawn: a missing reply never authorizes replay.
-          state.active={id:null,dir:null,stage:state.stage,agent:AGENTS[state.stage],model:state.routes[state.stage],session:state.session,startedAt:Date.now()};save();
+          state.active={id:null,dir:null,stage:state.stage,agent:AGENTS[state.stage],model:state.routes[state.stage],session:state.session,nativeSession:nativeOwnerSession(),startedAt:Date.now()};save();
           const launched=await d.rpc(pi.events,'spawn',{agent:state.active.agent,agentScope:'user',cwd:root,model:state.active.model,context:'fresh',async:true,task,outputSchema:REPORT_SCHEMA,output:false,share:false,timeoutMs:state.stage==='coder'?1800000:600000,acceptance:{level:'none',reason:'Delivery runs host checks and independent structured review gates'}},60000);
           if(launched?.isError || typeof launched?.details?.runId!=='string' || typeof launched?.details?.asyncDir!=='string')throw new Error('Native launch reply missing runId/asyncDir. Inspect subagent status; do not retry an uncertain launch.');
           state.active.id=launched.details.runId;state.active.dir=launched.details.asyncDir;save();
@@ -144,6 +159,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
         }
         if(!state.active.id)throw new Error('Unknown launch identity; inspect native subagent status. Automatic replay refused.');
         if(closed)return;
+        bindActiveNativeSession();
         await d.rpc(pi.events,'status',{id:state.active.id});
         let report;
         try {report=d.readOutcome(state.active);}catch(error){
@@ -198,6 +214,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   async function stop() {
     approval=false;state.stopping=true;save();checkController?.abort();
     if(state.active?.id) {
+      bindActiveNativeSession();
       await d.rpc(pi.events,'stop',{id:state.active.id});
       state.reason='Native stop requested, not proven closed. Use /delivery resume to observe closure; never launch a replacement.';save();
     } else if(state.active || state.pendingCheck)throw new Error('Unknown worker/check closure; inspect native status. No replacement is permitted.');
@@ -206,6 +223,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   async function resume() {
     guard();if(job)throw new Error('Already monitoring native execution');
     if(!state.active?.id)throw new Error('Resume only monitors a known native worker. Unknown launches/checks and failed runs require inspection; no automatic retry.');
+    bindActiveNativeSession();
     d.acquireLock(root,owner());
     if(!state.stopping)(state.active.stage==='coder'?assertCoderChanges:assertUnchanged)(state.snapshot,d.snapshot(root));
     // Resume observes this exact worker; it never revives or replaces one.

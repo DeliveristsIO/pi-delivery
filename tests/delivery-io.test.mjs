@@ -24,7 +24,7 @@ test('fingerprint includes untracked source, content and HEAD; canonical root in
 });
 test('completion requires actual terminal proof, model and structured report',t=>{
  const d=fixture(t),id='run';
- const a={id,dir:d,model:'custom/a',agent:'delivery-coder',session:'session'};
+ const a={id,dir:d,model:'custom/a',agent:'delivery-coder',nativeSession:'session'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:id,sessionId:'session',state:'complete',steps:[{agent:'delivery-coder',model:'custom/a',attemptedModels:['custom/a'],sessionFile:join(d,'actual-session.jsonl'),structuredOutputPath:join(d,'report.json')}]}));
  assert.equal(readOutcome(a),null);
  writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:id,state:'observed',instances:[{exitCode:0,signal:null}]}));
@@ -82,10 +82,10 @@ test('workspace lock excludes another session and never steals unknown ownership
  io.releaseLock('/workspace',owner);io.acquireLock('/workspace',{session:'two',run:'second'});
 });
 test('native partial failure needs terminal proof and cannot masquerade as completion',t=>{
- const d=fixture(t),active={id:'r',dir:d,session:'s',agent:'delivery-coder',model:'test/code'};
+ const d=fixture(t),active={id:'r',dir:d,nativeSession:'s',agent:'delivery-coder',model:'test/code'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'partial',error:'provider unavailable',steps:[]}));assert.equal(readOutcome(active),null);
  writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:'r',state:'observed',instances:[{exitCode:0,signal:null}]}));assert.throws(()=>readOutcome(active),e=>e.closed===true && /partial/.test(e.message));
- assert.throws(()=>readOutcome({...active,session:'foreign'}),/identity/);
+ assert.throws(()=>readOutcome({...active,nativeSession:'foreign'}),/identity/);
 });
 test('workspace lease rejects a second process even for the same retained session/run',t=>{
  const d=fixture(t),old=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=d;t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
@@ -100,8 +100,19 @@ test('snapshot hashes binary bytes without lossy text decoding',t=>{
  const d=fixture(t);execFileSync('git',['init','-q',d]);writeFileSync(join(d,'binary'),Buffer.from([255]));const before=snapshot(d);writeFileSync(join(d,'binary'),Buffer.from([254]));assert.notDeepEqual(snapshot(d),before);
 });
 test('expired terminal-proof wait stops with inspection guidance instead of polling forever',t=>{
- const d=fixture(t),active={id:'r',dir:d,session:'s',agent:'delivery-coder',model:'test/code'};
+ const d=fixture(t),active={id:'r',dir:d,nativeSession:'s',agent:'delivery-coder',model:'test/code'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'complete',endedAt:Date.now()-120000,steps:[]}));
  assert.throws(()=>readOutcome(active),/terminal proof.*inspect/i);
  writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:'foreign',state:'observed',instances:[{exitCode:0,signal:null}]}));assert.throws(()=>readOutcome(active),/identity/i);
+});
+test('native outcome requires exact bound owner and run, never a parent UUID/path alternative',t=>{
+ const d=fixture(t),active={id:'native-run',dir:d,session:'parent-uuid',nativeSession:join(d,'parent.jsonl'),agent:'delivery-coder',model:'test/code'};
+ const status={runId:active.id,sessionId:active.nativeSession,state:'complete',steps:[{agent:active.agent,model:active.model,attemptedModels:[active.model],structuredOutputPath:join(d,'report.json')}]};
+ const write=()=>writeFileSync(join(d,'status.json'),JSON.stringify(status));write();
+ writeFileSync(join(d,'report.json'),JSON.stringify({status:'approved',summary:'Synthetic report',findings:[]}));
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:active.id,state:'observed',instances:[{exitCode:0,signal:null}]}));
+ assert.equal(readOutcome(active).status,'approved');
+ for(const nativeSession of [undefined,null,'','   ',42])assert.throws(()=>readOutcome({...active,nativeSession}),/owner-session/);
+ for(const sessionId of [active.session,join(d,'foreign.jsonl'),null]){status.sessionId=sessionId;write();assert.throws(()=>readOutcome(active),/owner-session/);}
+ status.sessionId=active.nativeSession;status.runId='foreign-run';write();assert.throws(()=>readOutcome(active),/run-ID/);
 });
