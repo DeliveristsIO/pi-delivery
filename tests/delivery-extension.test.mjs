@@ -30,6 +30,25 @@ function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,
  return {handlers,tools,commands,calls,messages,saved,ctx,deps,activeTools,invoke,input,state,wait,start:()=>handlers.session_start({},ctx)};
 }
 
+test('completed review continuation prepares the next plan without resume or permission-to-plan loops',async()=>{
+ const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
+ const review={...plan(),mode:'review',tasks:plan().tasks.map(task=>({...task,checks:[]})),checks:[]};
+ await h.invoke('delivery_plan',review);await h.input('Approved');await h.invoke('delivery_execute');assert.equal((await h.wait()).stage,'complete');
+ const launches=h.calls.filter(c=>c.method==='spawn').length;
+ await h.input('continue');
+ const status=await h.invoke('delivery_status');const resumed=await h.invoke('delivery_resume');
+ for(const value of [status,resumed]) {
+  const text=value.content.map(part=>part.text).join('\n');
+  assert.match(text,/review complete.*nothing to resume/i);
+  assert.match(text,/delivery_plan/);assert.match(text,/do not ask.*want.*plan/i);
+  assert.match(text,/implementation still requires.*approval/i);
+ }
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,launches);
+ assert.match(h.handlers.before_agent_start().message.content,/completed review/i);
+ await h.invoke('delivery_plan',plan());await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,launches);
+});
+
 test('thin interface proposes without launching and questions never approve',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
  assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_plan','delivery_status','delivery_resume','delivery_stop'].sort());

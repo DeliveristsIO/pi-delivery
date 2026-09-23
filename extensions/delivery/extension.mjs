@@ -8,6 +8,7 @@ const ENTRY='delivery-coordinator-v2';
 const READ_TOOLS=['read','grep','find','ls'];
 const PARENT_TOOLS=[...READ_TOOLS,'delivery_plan','delivery_execute','delivery_status','delivery_configure','delivery_resume','delivery_stop'];
 const MAX_CORRECTIONS=2;
+const REVIEW_NEXT='Read-only review complete; nothing to resume. When the user says continue after a completed review and the intended implementation is clear, prepare the implementation proposal directly with delivery_plan. Do not ask whether they want a plan. Ask only about material unresolved requirements. Implementation still requires approval of the displayed implementation plan; review approval is not write authority.';
 const result=(text,details={})=>({content:[{type:'text',text}],details});
 const initial=()=>({version:2,enabled:false,stage:'planning',plan:null,active:null,task:0,round:0,changedPaths:{},reports:[],checks:[],reason:''});
 const id=model=>`${model.provider}/${model.id}`;
@@ -59,6 +60,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     const next=state.pendingCheck?'Host check closure is unknown. Inspect its process evidence; do not replay checks or approve another plan.':state.active?.id
       ? `${job?'Monitoring the retained worker.':'Call delivery_resume to observe/reconcile this exact retained worker, without new approval.'} delivery_stop requests cancellation only. If resume blocks, inspect the reported missing evidence; do not repeat approval/status/stop or restart to bypass it.`
       : state.active?'Launch identity is unknown. Inspect native artifacts; no replacement or approval can resolve missing ownership.'
+      : state.stage==='complete'?(state.plan?.mode==='review'?REVIEW_NEXT:'Implementation complete; nothing to resume.')
       : state.stage==='blocked'?'Inspect the recorded failure. Approval is not recovery authority; no automatic retry.':'';
     return clip([clip(status(),1000),next,
       clip(`Actual changed paths by task (all correction rounds): ${JSON.stringify(state.changedPaths || {})}`,1500),
@@ -241,6 +243,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   async function resume() {
     guard();if(preparing)throw new Error('Delivery ownership operation is already in progress');
     if(job)return result('Already monitoring the exact retained worker; use delivery_status for evidence.');
+    if(state.stage==='complete' && !state.active && !state.pendingCheck)return result(evidenceText(),structuredClone(state));
     if(!state.active?.id)throw new Error('Resume only monitors a known native worker. Unknown launches/checks and failed runs require inspection; no automatic retry.');
     try {
       const active=bindActiveNativeSession(false);
@@ -293,7 +296,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   pi.on('input',async event=>{approval=Boolean(state.stage==='awaiting-approval' && ['interactive','rpc'].includes(event.source) && isApproval(event.text));return {action:'continue'};});
   pi.on('tool_call',event=>{if(state.enabled && !PARENT_TOOLS.includes(event.toolName))return {block:true,reason:'Delivery coordinator is read-only. Native workers execute approved changes; no unmanaged tools.'};});
   pi.on('user_bash',()=>{if(state.enabled)throw new Error('Delivery is coordinating; stop/off before running unmanaged shell commands.');});
-  pi.on('before_agent_start',()=>{if(state.enabled)return {message:{customType:'delivery-guidance',content:'Use orchestrate-delivery and SPARK methodology. Plan with delivery_plan; never launch for questions or planning-only intent. Only delivery_execute starts an approved unchanged proposal. Inspect delivery_status for real evidence. For continue on a retained worker, call delivery_resume without new approval; delivery_stop requests cancellation only. Report missing ownership/closure evidence rather than repeating approval/status/stop or asking for restart. Never replace from arbitrary text. No direct subagents, Git writes or invented checks.',display:false}};});
+  pi.on('before_agent_start',()=>{if(state.enabled)return {message:{customType:'delivery-guidance',content:'Use orchestrate-delivery and SPARK methodology. Plan with delivery_plan; never launch for questions or planning-only intent. Only delivery_execute starts an approved unchanged proposal. Inspect delivery_status for real evidence. For continue on a retained worker, call delivery_resume without new approval; delivery_stop requests cancellation only. Report missing ownership/closure evidence rather than repeating approval/status/stop or asking for restart. Never replace from arbitrary text. No direct subagents, Git writes or invented checks. '+REVIEW_NEXT,display:false}};});
   const loadSession=async(_event,context)=>{
     if(toolsBefore)pi.setActiveTools(toolsBefore);
     ctx=context;closed=false;approval=false;state=initial();root=undefined;

@@ -11,6 +11,12 @@ test('current prompts describe only the thin pipeline and common structured repo
  assert.doesNotMatch(text,/delivery_(cleanup|scope|steer|diff|inspect)|correctionAdoption|reviewPolicy|executionProfile/);
  const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');assert.match(security,/Findings are strings/);
 });
+test('completed review guidance avoids permission-to-plan questions without granting implementation authority',()=>{
+ const text=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
+ assert.match(text,/completed review/i);assert.match(text,/do not ask.*want.*plan/i);
+ assert.match(text,/implementation still requires.*approval/i);
+});
+
 test('public documentation relative links resolve',()=>{
  for(const name of ['README.md','CONTRIBUTING.md','SECURITY.md','tests/README.md','docs/configuration.md','docs/roadmap.md','docs/releasing.md']) {
   const path=resolve(root,name),text=readFileSync(path,'utf8');
