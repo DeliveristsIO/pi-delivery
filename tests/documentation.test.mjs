@@ -1,21 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,existsSync} from 'node:fs';
+import {readFileSync,existsSync,readdirSync} from 'node:fs';
 import {resolve,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
-test('orchestration guidance uses real delivery gates rather than direct worker dispatch',()=>{
+test('current prompts describe only the thin pipeline and common structured report contract',()=>{
  const text=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
- assert.match(text,/delivery_plan/);assert.match(text,/delivery_execute/);assert.match(text,/delivery_resume/);
- assert.match(text,/new corrective plan/i);assert.match(text,/No saved Markdown file is required/);
- assert.match(text,/Do not generate another corrective plan automatically after final exhaustion/i);
- assert.doesNotMatch(text,/No custom .*setup command is required|Dispatch `delivery-coder`|instruction limit, not mechanical/);
-});
-test('cleanup guidance describes exact native confirmation, preservation and unchanged implementation authority',()=>{
- for(const name of ['README.md','docs/configuration.md','skills/orchestrate-delivery/SKILL.md']) {
-  const text=readFileSync(resolve(root,name),'utf8');
-  assert.match(text,/delivery_cleanup/);assert.match(text,/native confirmation/);assert.match(text,/manifest\.json/);assert.match(text,/never delete/i);assert.match(text,/cleanup.*(?:not|never).*implementation (?:approval|authority)/i);
- }
+ for(const name of ['delivery_plan','delivery_execute','delivery_status'])assert.ok(text.includes(name));
+ assert.match(text,/two correction rounds/);assert.match(text,/Unsupported old journals/);assert.match(text,/read-only review/i);
+ assert.doesNotMatch(text,/delivery_(cleanup|scope|resume|steer|diff|inspect)|correctionAdoption|reviewPolicy|executionProfile/);
+ const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');assert.match(security,/Findings are strings/);
 });
 test('public documentation relative links resolve',()=>{
  for(const name of ['README.md','CONTRIBUTING.md','SECURITY.md','tests/README.md','docs/configuration.md','docs/roadmap.md','docs/releasing.md']) {
@@ -26,21 +20,9 @@ test('public documentation relative links resolve',()=>{
   }
  }
 });
-test('recovery documentation explains explicit dirty-candidate adoption and reload limits',()=>{
- const configuration=readFileSync(resolve(root,'docs/configuration.md'),'utf8');const readme=readFileSync(resolve(root,'README.md'),'utf8');
- for(const text of [configuration,readme]) {
-  assert.match(text,/correctionAdoption/);assert.match(text,/branch.*HEAD.*inventory.*index.*fingerprint/is);assert.match(text,/no (?:WIP )?commit.*stash.*baseline commit/is);assert.match(text,/reload|restart/i);
-  assert.match(text,/standalone.*review.*(?:read-only|no write|does not).*author/i);assert.match(text,/full adopted candidate|original changes/i);
- }
-});
-test('configuration documentation defines the version-1 correction policy migration',()=>{
- const configuration=readFileSync(resolve(root,'docs/configuration.md'),'utf8');
- const readme=readFileSync(resolve(root,'README.md'),'utf8');
- for(const text of [configuration,readme]) {
-  assert.match(text, /"corrections"\s*:\s*\{\s*"maxFixRounds"\s*:\s*4\s*\}/);
-  assert.match(text, /integers?\s+`?0\.\.8`?/i);
-  assert.match(text, /default\s+(?:is\s+)?`?4`?\s+for\s+new\s+plans/i);
-  assert.match(text, /older\s+retained\s+plans?.*2.*(?:explicit|migration)/i);
-  assert.match(text, /Phase\s+2.*profiles.*migration/i);
- }
+test('all runtime modules are explicitly packaged; removed modules are not referenced',()=>{
+ const pkg=JSON.parse(readFileSync(resolve(root,'package.json'),'utf8'));
+ for(const file of readdirSync(resolve(root,'extensions/delivery')))assert.ok(pkg.files.includes(`extensions/delivery/${file}`),file);
+ assert.ok(!pkg.files.some(file=>/cleanup|merge\.mjs/.test(file)));
+ for(const file of pkg.files)assert.ok(existsSync(resolve(root,file)),file);
 });

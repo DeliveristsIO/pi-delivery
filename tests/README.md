@@ -1,15 +1,15 @@
 # Tests
 
-Run `npm test` from the checkout. Tests use isolated fixtures and do not start model inference or application workers.
+Run `npm test`. Tests use isolated fixtures, stubbed native RPC execution and actual filesystem/process checks; no model inference or real application workers are launched. Installer/bootstrap tests retain their no-clobber, ordering and privacy safeguards.
 
-Coverage includes approval binding, exact routes, task/final check separation, bounded timeout recovery, refusal of ambiguous launches, read-only review recovery, source/workspace fingerprints and real Bash installer behavior. Installer cases cover relocation, collisions, ancestor blockers and preflight race handling. Bootstrap cases drive the real `setup.sh` against a stubbed `pi` to assert pinned package installs (with npm lifecycle scripts ignored) before linking, rerun idempotency, conflict reporting and the loading-check paths.
+When pi-subagents is installed, an additional no-inference test imports its real RPC bridge and tool-plan resolver, exercising a stub executor and the packaged read-only profiles. It is skipped explicitly when the package is absent.
 
-The reviewer-prompt test additionally executes the installed pi-subagents task-intent classifier unchanged when it is available under the normal agent package directory or `PI_SUBAGENTS_DIR`. Without that optional installation, deterministic prompt-contract tests still run; native classifier coverage is not implied.
+Coverage includes approval/non-launch, exact routes, task/final ordering, independent review, bounded corrections, malformed results, unknown launch refusal, cancellation/reload, dirty workspace preservation, read-only Git, schemas and profile tool allowlists. Removed engine-only suites covered intentionally deleted Git lifecycle, cleanup, optimizer and recovery/migration features; essential safeguards now live in the small lifecycle/I/O/policy suites.
 
 ```bash
 node tests/check-installed.mjs /path/to/trusted/repository
 ```
 
-This optional loading check starts a disposable Pi process, queries commands/status, and exits. It does not request inference, resume a saved application session or dispatch workers. It requires an existing Pi installation and installed delivery links.
+This optional check starts ephemeral offline Pi, queries commands/status and exits without inference, workers or a saved-session resume. It requires existing installed links. When invoked from a subagent shell, use `PI_SUBAGENT_CHILD=0 node tests/check-installed.mjs ...` only for this isolated probe; ordinary child sessions intentionally do not register the coordinator.
 
-A passing synthetic suite does not prove provider availability or successful application delivery. Real worker checks require explicit model/provider consent and disposable fixtures. Keep their private receipts outside published files.
+Synthetic tests and loading checks are not evidence of successful provider end-to-end operation. That requires separate explicit consent. Keep private receipts outside the repository.

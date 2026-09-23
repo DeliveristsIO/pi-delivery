@@ -1,8 +1,8 @@
 export const ROLE_HELP = {
   planning: 'researches the repository, discusses designs and writes the plan; no implementation',
   coder: 'implements approved tasks and adds/runs tests; needs reliable coding and tool use',
-  spec: 'checks acceptance criteria and scope in a fresh read-only review',
-  quality: 'checks correctness, edge cases, maintainability and test coverage in a fresh review',
+  spec: 'legacy route retained for configuration compatibility; unused by the coordinator',
+  quality: 'combined specification compliance, correctness, edge cases, maintainability and tests in a fresh read-only review',
   security: 'checks security risks, trust boundaries and sensitive changes in a fresh read-only review',
 };
 const tokens=n=>typeof n==='number' && Number.isFinite(n) && n>0 ? `${Math.round(n/1000)}k` : '?';

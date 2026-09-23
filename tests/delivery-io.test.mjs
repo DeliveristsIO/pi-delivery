@@ -4,7 +4,7 @@ import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,rmSync,utimesSync} fr
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {loadConfig,saveConfig,fingerprint,repoRoot,readOutcome,correctionCandidate,assertCorrectionCandidate} from '../extensions/delivery/io.mjs';
+import {loadConfig,saveConfig,snapshot,repoRoot,readOutcome} from '../extensions/delivery/io.mjs';
 import * as io from '../extensions/delivery/io.mjs';
 const inspectRepository=(...args)=>io.inspectRepository(...args);
 import {rpc} from '../extensions/delivery/rpc.mjs';
@@ -18,19 +18,18 @@ test('config default, atomic roundtrip, malformed input and symlink refusal', t=
 });
 test('fingerprint includes untracked source, content and HEAD; canonical root in subdirectory',t=>{
  const d=fixture(t);execFileSync('git',['init','-q',d]);
- writeFileSync(join(d,'a'),'one');const a=fingerprint(d);writeFileSync(join(d,'a'),'two');assert.notEqual(fingerprint(d),a);
+ writeFileSync(join(d,'a'),'one');const a=JSON.stringify(snapshot(d));writeFileSync(join(d,'a'),'two');assert.notEqual(JSON.stringify(snapshot(d)),a);
  assert.equal(repoRoot(d),d);
- symlinkSync('/etc/passwd',join(d,'link'));assert.throws(()=>fingerprint(d,{scope:['link']}),/symlink/);
+ symlinkSync('/etc/passwd',join(d,'link'));assert.match(snapshot(d).link,/^symlink:/);
 });
 test('completion requires actual terminal proof, model and structured report',t=>{
  const d=fixture(t),id='run';
- const a={id,dir:d,model:'custom/a'};
- writeFileSync(join(d,'status.json'),JSON.stringify({runId:id,state:'complete',steps:[{model:'custom/a',attemptedModels:['custom/a'],sessionFile:join(d,'actual-session.jsonl'),structuredOutputPath:join(d,'report.json')}]}));
+ const a={id,dir:d,model:'custom/a',agent:'delivery-coder',session:'session'};
+ writeFileSync(join(d,'status.json'),JSON.stringify({runId:id,sessionId:'session',state:'complete',steps:[{agent:'delivery-coder',model:'custom/a',attemptedModels:['custom/a'],sessionFile:join(d,'actual-session.jsonl'),structuredOutputPath:join(d,'report.json')}]}));
  assert.equal(readOutcome(a),null);
  writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:id,state:'observed',instances:[{exitCode:0,signal:null}]}));
- writeFileSync(join(d,'report.json'),JSON.stringify({status:'approved',summary:'ok',findings:[],executionEvidence:{sessionFiles:['/fabricated']}}));
+ writeFileSync(join(d,'report.json'),JSON.stringify({status:'approved',summary:'ok',findings:[]}));
  assert.equal(readOutcome(a).status,'approved');
- assert.deepEqual(readOutcome(a).executionEvidence.sessionFiles,[join(d,'actual-session.jsonl')]);
  assert.throws(()=>readOutcome({...a,model:'other/a'}),/model/);
  const s=JSON.parse(readFileSync(join(d,'status.json')));s.steps[0].attemptedModels=[];
  writeFileSync(join(d,'status.json'),JSON.stringify(s));assert.throws(()=>readOutcome(a),/model/);
@@ -41,20 +40,6 @@ test('RPC correlates replies and times out without installed owner',async()=>{
  assert.deepEqual(await rpc(events,'ping',{},50),{ok:true});assert.equal(listeners.size,0);
  events.emit=()=>{};await assert.rejects(rpc(events,'ping',{},5),/timed out/);assert.equal(listeners.size,0);
 });
-test('correction candidate binds dirty Git ownership, inventory, index and content',t=>{
- const d=fixture(t);execFileSync('git',['init','-q','-b','main',d]);writeFileSync(join(d,'a'),'base\n');execFileSync('git',['-C',d,'add','a']);execFileSync('git',['-C',d,'-c','user.name=T','-c','user.email=t@x','commit','-qm','base']);
- writeFileSync(join(d,'a'),'candidate\n');writeFileSync(join(d,'new'),'new\n');execFileSync('git',['-C',d,'add','a']);
- const candidate=correctionCandidate(d,['a','new']);assert.deepEqual(candidate.inventory,['a','new']);assert.deepEqual(candidate.staged,['a']);assert.equal(candidate.branch,'main');assert.equal(candidate.clean,false);
- assert.deepEqual(assertCorrectionCandidate(d,['a','new'],candidate),candidate);
- writeFileSync(join(d,'new'),'changed\n');assert.throws(()=>assertCorrectionCandidate(d,['a','new'],candidate),/changed|candidate|fingerprint/i);
-});
-test('correction candidate rejects out-of-scope work, foreign staging and symlink widening',t=>{
- const d=fixture(t);execFileSync('git',['init','-q','-b','main',d]);writeFileSync(join(d,'a'),'base\n');writeFileSync(join(d,'outside'),'base\n');execFileSync('git',['-C',d,'add','-A']);execFileSync('git',['-C',d,'-c','user.name=T','-c','user.email=t@x','commit','-qm','base']);
- writeFileSync(join(d,'a'),'candidate\n');writeFileSync(join(d,'outside'),'foreign\n');assert.throws(()=>correctionCandidate(d,['a']),/outside|scope/i);
- execFileSync('git',['-C',d,'restore','outside']);execFileSync('git',['-C',d,'add','a']);assert.throws(()=>correctionCandidate(d,['a'],{allowStaged:false}),/staged/i);
- execFileSync('git',['-C',d,'restore','--staged','a']);rmSync(join(d,'a'));symlinkSync('/etc/passwd',join(d,'a'));assert.throws(()=>correctionCandidate(d,['a']),/symlink/i);
-});
-
 test('controlled inspection uses fixed read-only Git operations, not aliases, hooks or shell',t=>{
  const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args]);git('init','-q','-b','main');
  writeFileSync(join(d,'a'),'base\n');git('add','a');git('-c','user.name=T','-c','user.email=t@x','commit','-qm','base');
@@ -86,6 +71,37 @@ test('controlled inspection paginates bounded output',t=>{
  const d=fixture(t);execFileSync('git',['init','-q',d]);
  for(let i=0;i<600;i++)writeFileSync(join(d,String(i).padStart(3,'0')+'-'.repeat(80)),'');
  const first=inspectRepository(d,'status'),next=inspectRepository(d,'status',40000);
- assert.match(first,/truncated.*offset=40000/i);assert.ok(first.length<40200);
+ assert.match(first,/truncated at 40000/i);assert.ok(first.length<40200);
  assert.match(next,/599/);assert.notEqual(first,next);
+});
+test('workspace lock excludes another session and never steals unknown ownership',t=>{
+ const d=fixture(t),old=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=d;t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
+ const owner={session:'one',run:'first'};io.acquireLock('/workspace',owner);io.acquireLock('/workspace',owner);
+ assert.throws(()=>io.acquireLock('/workspace',{session:'two',run:'second'}),/owned/);
+ assert.throws(()=>io.releaseLock('/workspace',{session:'one',run:'wrong'}),/ownership/);
+ io.releaseLock('/workspace',owner);io.acquireLock('/workspace',{session:'two',run:'second'});
+});
+test('native partial failure needs terminal proof and cannot masquerade as completion',t=>{
+ const d=fixture(t),active={id:'r',dir:d,session:'s',agent:'delivery-coder',model:'test/code'};
+ writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'partial',error:'provider unavailable',steps:[]}));assert.equal(readOutcome(active),null);
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:'r',state:'observed',instances:[{exitCode:0,signal:null}]}));assert.throws(()=>readOutcome(active),e=>e.closed===true && /partial/.test(e.message));
+ assert.throws(()=>readOutcome({...active,session:'foreign'}),/identity/);
+});
+test('workspace lease rejects a second process even for the same retained session/run',t=>{
+ const d=fixture(t),old=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=d;t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
+ io.acquireLock('/workspace',{session:'one',run:'same',pid:123});
+ assert.throws(()=>io.acquireLock('/workspace',{session:'one',run:'same',pid:456}),/owned/);
+});
+test('snapshot metadata cannot collide with a tracked or untracked source filename',t=>{
+ const d=fixture(t);execFileSync('git',['init','-q',d]);writeFileSync(join(d,'$git-index'),'ordinary source');
+ const s=snapshot(d);assert.equal(typeof s['.git/index'],'string');assert.equal(typeof s['$git-index'],'string');assert.notEqual(s['.git/index'],s['$git-index']);
+});
+test('snapshot hashes binary bytes without lossy text decoding',t=>{
+ const d=fixture(t);execFileSync('git',['init','-q',d]);writeFileSync(join(d,'binary'),Buffer.from([255]));const before=snapshot(d);writeFileSync(join(d,'binary'),Buffer.from([254]));assert.notDeepEqual(snapshot(d),before);
+});
+test('expired terminal-proof wait stops with inspection guidance instead of polling forever',t=>{
+ const d=fixture(t),active={id:'r',dir:d,session:'s',agent:'delivery-coder',model:'test/code'};
+ writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'complete',endedAt:Date.now()-120000,steps:[]}));
+ assert.throws(()=>readOutcome(active),/terminal proof.*inspect/i);
+ writeFileSync(join(d,'process-terminal.json'),JSON.stringify({runId:'foreign',state:'observed',instances:[{exitCode:0,signal:null}]}));assert.throws(()=>readOutcome(active),/identity/i);
 });

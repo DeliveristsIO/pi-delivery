@@ -1,22 +1,15 @@
 # Contributing
 
-Use Node.js 24+, Bash and GNU coreutils. No npm dependency installation is required for unit tests.
+Keep delivery thin: SPARK supplies methodology, pi-subagents owns native execution, and this extension only binds approval/routes/context, progresses required gates and reports evidence. Prefer deletion over configurable workflow machinery. No dependencies or model-backed fixtures are needed for the test suite.
+
+Before changing native RPC handling, inspect the installed pi-subagents schemas, normalizer, RPC bridge and lifecycle artifacts; prose references may lag source. Add failing regressions for approval, duplicate launch prevention, terminal evidence, read-only reviews and check ordering before implementation.
 
 ```bash
 npm test
-bash -n install.sh
+bash -n install.sh setup.sh
+npm run check:release
 ```
 
-Follow SPARK's debugging, TDD and review practices. Reproduce a bug before patching it; keep changes focused. Preserve model bindings, workspace checks, original evidence and native worker ownership. Never broaden reviewer tools to work around a routing error.
+Keep installer/release safeguards and package allowlists consistent. Remove tests only when the feature is intentionally removed, replacing essential safety coverage with lifecycle tests. Historical `docs/spark` plans/specs are records, not current runtime instructions. Never add session files, credentials, private paths or local reports to the package.
 
-Layout:
-
-- `extensions/delivery/`: runtime, policy, IO, RPC, schemas and setup.
-- `agents/`, `skills/`: installed delivery resources.
-- `install.sh`: offline, conflict-safe linking.
-- `tests/`: synthetic controller, filesystem and installer regressions.
-- `docs/`: public configuration, roadmap and release guidance.
-
-Use synthetic examples. Do not add real session logs, credentials, customer source, private issue text or machine-specific receipts. Keep local investigation artifacts in ignored `.spark/` storage, outside publication contents.
-
-Independent review should inspect actual code and recorded checks, not trust a worker's success claim. Record tests not run and unresolved findings. Avoid automatic commits or remote actions unless explicitly authorized.
+A no-inference loading check is described in [tests](tests/README.md). Provider/model execution requires separate explicit consent. Report exact commands, results and limitations; passing synthetic tests do not prove live delivery.
