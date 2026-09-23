@@ -11,6 +11,12 @@ test('orchestration guidance uses real delivery gates rather than direct worker 
  assert.match(text,/Do not generate another corrective plan automatically after final exhaustion/i);
  assert.doesNotMatch(text,/No custom .*setup command is required|Dispatch `delivery-coder`|instruction limit, not mechanical/);
 });
+test('cleanup guidance describes exact native confirmation, preservation and unchanged implementation authority',()=>{
+ for(const name of ['README.md','docs/configuration.md','skills/orchestrate-delivery/SKILL.md']) {
+  const text=readFileSync(resolve(root,name),'utf8');
+  assert.match(text,/delivery_cleanup/);assert.match(text,/native confirmation/);assert.match(text,/manifest\.json/);assert.match(text,/never delete/i);assert.match(text,/cleanup.*(?:not|never).*implementation (?:approval|authority)/i);
+ }
+});
 test('public documentation relative links resolve',()=>{
  for(const name of ['README.md','CONTRIBUTING.md','SECURITY.md','tests/README.md','docs/configuration.md','docs/roadmap.md','docs/releasing.md']) {
   const path=resolve(root,name),text=readFileSync(path,'utf8');

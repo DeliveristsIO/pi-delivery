@@ -16,6 +16,7 @@
     "extensions/delivery/extension.mjs",
     "extensions/delivery/policy.mjs",
     "extensions/delivery/io.mjs",
+    "extensions/delivery/cleanup.mjs",
     "extensions/delivery/rpc.mjs",
     "extensions/delivery/setup.mjs",
     "agents/delivery-coder.md",

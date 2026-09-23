@@ -115,7 +115,7 @@ export function repairCheckScopes(state,taskChecks) {
   return s;
 }
 export function parentToolAllowed(name, input) {
-  if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_scope','delivery_status','delivery_diff','delivery_inspect','delivery_configure','delivery_steer'].includes(name)) return true;
+  if (['read','grep','find','ls','delivery_plan','delivery_execute','delivery_resume','delivery_scope','delivery_status','delivery_diff','delivery_inspect','delivery_cleanup','delivery_configure','delivery_steer'].includes(name)) return true;
   if (name==='subagent') return ['status','list','get','models','guide','doctor','children.list'].includes(input?.action);
   // Keep reply out of this global allowlist: only the extension's active-owned-run
   // interception admits native supervisor replies, which are informational evidence

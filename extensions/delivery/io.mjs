@@ -202,7 +202,10 @@ export function branchState(root) {
 }
 export function lifecyclePreflight(root) {
   const state=branchState(root);
-  if(!state.clean)throw new Error('Delivery requires a clean tracked and untracked worktree before proposal. Reviewed dirty work must use an explicitly authorized correctionAdoption plan; ordinary plans still require commit or stash. No automatic stash or baseline commit was created.');
+  if(!state.clean) {
+    const untrackedOnly=state.status.split('\n').filter(Boolean).every(line=>line.startsWith('?? '));
+    throw new Error('Delivery requires a clean tracked and untracked worktree before proposal. Reviewed dirty work must use an explicitly authorized correctionAdoption plan; existing dirty-work ownership is unchanged. No automatic stash or baseline commit was created.'+(untrackedOnly?' For eligible untracked paths with no retained delivery ownership, use delivery_cleanup inspect with exact paths, then apply its token for native confirmation and recoverable relocation; never delete artifacts by name.':''));
+  }
   return state;
 }
 export function branchExists(root,name) {
@@ -503,12 +506,13 @@ export function validateCommands(cwd,commands) {
 export function verifyCommand(cwd,command,signal,timeoutMs=120000) {
   return new Promise((resolve,reject)=>{
     const p=spawn('/bin/bash',['--noprofile','--norc','-c',command],{cwd,detached:true,stdio:['ignore','pipe','pipe']});
-    let output='',terminated=false;
-    const stop=()=>{terminated=true;try{process.kill(-p.pid,'SIGKILL');}catch{}};
-    const timer=setTimeout(stop,timeoutMs);
+    let output='',terminated=false,terminationReason=null;
+    const terminate=reason=>{terminated=true;terminationReason ||= reason;try{process.kill(-p.pid,'SIGKILL');}catch{}};
+    const stop=()=>terminate('aborted');
+    const timer=setTimeout(()=>terminate('timeout'),timeoutMs);
     signal?.addEventListener('abort',stop,{once:true});if(signal?.aborted)stop();
     const collect=b=>{output=(output+b.toString()).slice(-40000);};p.stdout.on('data',collect);p.stderr.on('data',collect);
     p.on('error',e=>{clearTimeout(timer);signal?.removeEventListener('abort',stop);reject(e);});
-    p.on('close',(code,sig)=>{clearTimeout(timer);signal?.removeEventListener('abort',stop);resolve({command,code,signal:sig,terminated,output});});
+    p.on('close',(code,sig)=>{clearTimeout(timer);signal?.removeEventListener('abort',stop);resolve({command,code,signal:sig,terminated,terminationReason:terminationReason || (sig?'signal':null),processClosed:true,timeoutMs,output});});
   });
 }

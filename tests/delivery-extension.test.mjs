@@ -23,6 +23,79 @@ function harness(config={version:1,routes,evidence:{},repos:['/repo']}) {
  const controller=registerDelivery(pi,{plan:{},empty:{}},deps);
  return {pi,ctx,events,commands,tools,entries,statuses,messages,calls,controller,deps,config};
 }
+function cleanupHarness() {
+ const h=harness();let applied=0;
+ const candidate={token:'token',session:'session',repository:'/repo',paths:['generated'],inventory:[{path:'generated/one',hash:'hash'}],snapshot:'cleanup-hash',backup:'/recovery/token'};
+ h.deps.inspectCleanup=()=>structuredClone(candidate);
+ h.deps.applyCleanup=(_root,_candidate,_session,{journal})=>{applied++;const out={phase:'complete',backup:candidate.backup,moves:[{source:'/repo/generated',destination:'/recovery/token/item-0'}],status:''};journal(out);return out;};
+ return {...h,candidate,applied:()=>applied};
+}
+for(const decision of ['yes','decline','no-ui','new-turn','shutdown','state-change','parallel'])test(`cleanup requires one native exact confirmation: ${decision}`,async()=>{
+ const h=cleanupHarness();await h.events.session_start({},h.ctx);await h.events.input({text:'Please inspect the blocker',source:'interactive'},h.ctx);
+ assert.ok(h.tools.delivery_cleanup,'cleanup tool must be registered');
+ assert.equal(await h.events.tool_call({toolName:'delivery_cleanup',input:{phase:'inspect'}},h.ctx),undefined);
+ const c=await h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx);
+ assert.equal(c.details.token,'token');assert.equal(h.applied(),0);
+ if(decision==='no-ui')h.ctx.hasUI=false;
+ let confirmations=0;
+ h.ctx.ui.confirm=async(_title,text)=>{confirmations++;assert.match(text,/generated\/one/);assert.match(text,/\/recovery\/token/);assert.match(text,/no other process/i);
+  if(decision==='new-turn')await h.events.input({text:'Stop',source:'interactive'},h.ctx);
+  if(decision==='shutdown')await h.events.session_shutdown();
+  if(decision==='state-change')await h.commands.delivery.handler('off',h.ctx);
+  if(decision==='parallel')await assert.rejects(h.tools.delivery_cleanup.execute('p',{phase:'apply',token:'token'},null,null,h.ctx),/progress|busy/i);
+  return decision!=='decline';
+ };
+ const run=h.tools.delivery_cleanup.execute('a',{phase:'apply',token:'token'},null,null,h.ctx);
+ if(['no-ui','new-turn','shutdown','state-change'].includes(decision))await assert.rejects(run,/UI|changed|closed/i);else await run;
+ assert.equal(h.applied(),['yes','parallel'].includes(decision)?1:0);
+ assert.equal(confirmations,decision==='no-ui'?0:1);
+ assert.equal(h.calls.length,0,'cleanup never launches implementation');
+ if(decision==='yes') {await h.tools.delivery_cleanup.execute('again',{phase:'apply',token:'token'},null,null,h.ctx);assert.equal(confirmations,1);assert.equal(h.applied(),1);}
+});
+for(const stage of ['blocked','coder','awaiting-approval','complete'])test(`cleanup protects retained delivery state: ${stage}`,async()=>{
+ const h=cleanupHarness();h.entries.push(oldRunEntry(stage,routes));await h.events.session_start({},h.ctx);
+ assert.ok(h.tools.delivery_cleanup,'cleanup tool must be registered');
+ const run=h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx);
+ if(stage==='complete')await run;else await assert.rejects(run,/retained|owned|unresolved|pending/i);
+ assert.equal(h.applied(),0);
+});
+test('cleanup retains unknown foreign ownership across reload',async()=>{
+ const h=cleanupHarness(),entry=oldRunEntry('blocked',routes);entry.data.owner='another-session';h.entries.push(entry);await h.events.session_start({},h.ctx);await h.commands.delivery.handler('',h.ctx);await h.events.session_start({},h.ctx);
+ await assert.rejects(h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx),/unknown|retained|unresolved/);
+});
+test('cleanup permits terminal implementation history even with an old retained snapshot',async()=>{
+ const h=cleanupHarness();h.entries.push(oldRunEntry('complete',routes,{plan:{...plan,mode:'implementation'},retainedRun:{state:{stage:'blocked',plan:{...plan,mode:'implementation'}}}}));await h.events.session_start({},h.ctx);
+ await h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx);assert.equal(h.applied(),0);
+});
+test('cleanup protects unfinished retained implementation even behind a completed review',async()=>{
+ const h=cleanupHarness();h.entries.push(oldRunEntry('complete',routes,{plan:{...plan,mode:'review'},retainedRun:{state:{stage:'blocked',plan:{...plan,mode:'implementation'}}}}));await h.events.session_start({},h.ctx);
+ await assert.rejects(h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx),/retained/);assert.equal(h.applied(),0);
+});
+test('cleanup cannot apply an unknown token or model-supplied approval',async()=>{
+ const h=cleanupHarness();await h.events.session_start({},h.ctx);assert.ok(h.tools.delivery_cleanup);
+ await assert.rejects(h.tools.delivery_cleanup.execute('a',{phase:'apply',token:'invented',approved:true},null,null,h.ctx),/token|inspect|argument/i);assert.equal(h.applied(),0);
+});
+for(const changed of [false,true])test(`cleanup retries only the same preflight-blocked proposal: changed=${changed}`,async()=>{
+ const h=cleanupHarness();await h.events.session_start({},h.ctx);const text='Implement the fixture';await h.events.input({text,source:'interactive'},h.ctx);
+ const proposal={...plan,executionIntent:{kind:'explicit-implementation',userTurn:text}};
+ h.deps.lifecyclePreflight=()=>{throw new Error('Delivery requires a clean tracked and untracked worktree before proposal.');};
+ await assert.rejects(h.tools.delivery_plan.execute('p',proposal,null,null,h.ctx),/clean tracked/);
+ await h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx);
+ await h.tools.delivery_cleanup.execute('a',{phase:'apply',token:'token'},null,null,h.ctx);
+ assert.equal(h.calls.length,0);
+ h.deps.lifecyclePreflight=()=>({branch:'main',defaultBranch:'main',head:'hash',clean:true,status:''});
+ const retry=h.tools.delivery_plan.execute('retry',changed?{...proposal,title:'Unapproved changed plan'}:proposal,null,null,h.ctx);
+ if(changed){await assert.rejects(retry,/changed.*implementation plan/);assert.equal(h.calls.length,0);}
+ else {await retry;await h.controller.settled();assert.equal(h.controller.state().stage,'complete');}
+});
+test('cleanup does not turn a planning-only proposal into implementation authority',async()=>{
+ const h=cleanupHarness();await h.events.session_start({},h.ctx);await h.events.input({text:'Only plan this work',source:'interactive'},h.ctx);
+ h.deps.lifecyclePreflight=()=>{throw new Error('Delivery requires a clean tracked and untracked worktree before proposal.');};
+ const p={...plan,start:false};await assert.rejects(h.tools.delivery_plan.execute('p',p,null,null,h.ctx));
+ await h.tools.delivery_cleanup.execute('i',{phase:'inspect',paths:['generated']},null,null,h.ctx);await h.tools.delivery_cleanup.execute('a',{phase:'apply',token:'token'},null,null,h.ctx);
+ h.deps.lifecyclePreflight=()=>({branch:'main',defaultBranch:'main',head:'hash',clean:true,status:''});await h.tools.delivery_plan.execute('p',p,null,null,h.ctx);
+ assert.equal(h.controller.state().stage,'awaiting-approval');assert.equal(h.calls.length,0);
+});
 const securityPreflightError="Run fan-out: 1/64 used, 63 remaining\nAgent 'delivery-security' was given an implementation task, but its tool allowlist has no mutation-capable tools. Add bash, edit, write, or another mutation-capable tool to the agent, or use a read-only task/agent.";
 test('blocked worker dispatch permits recovery through an approved delivery plan',async()=>{
  const h=harness();await h.events.session_start({},h.ctx);const before=h.controller.state();
@@ -355,14 +428,14 @@ for(const approval of ['accepted','declined','workspace changed','state changed'
  assert.equal(h.controller.state().coding[0].spentMs,900000);
  assert.ok(h.controller.state().reports.some(r=>r.runId==='old2'));
 });
-test('interrupted task verification resumes checks and reviewers without replaying the coder',async()=>{
+test('interrupted task verification without persisted closure blocks duplicate checks or coder replay',async()=>{
  const h=harness();const p={...plan,tasks:[{...plan.tasks[0],checks:['node task-test.mjs']}],checks:['node release-test.mjs']};
  h.deps.verifyCommand=async()=>{await h.events.session_shutdown({},h.ctx);return {code:0,output:'interrupted receipt'};};
  await h.events.session_start({},h.ctx);await h.tools.delivery_plan.execute('plan',p,null,null,h.ctx);await h.commands.delivery.handler('approve',h.ctx);await h.controller.settled();
  assert.equal(h.controller.state().stage,'checks');
  const next=harness();next.entries.push(h.entries.at(-1));await next.events.session_start({},next.ctx);
- await next.tools.delivery_resume.execute('resume',{},null,null,next.ctx);await next.controller.settled();
- assert.equal(next.controller.state().stage,'complete');assert.equal(next.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);assert.equal(next.controller.state().reports.filter(r=>r.stage==='coder').length,1);
+ await assert.rejects(next.tools.delivery_resume.execute('resume',{},null,null,next.ctx),/closure is unresolved/);
+ assert.equal(next.controller.state().stage,'blocked');assert.equal(next.calls.length,0);assert.equal(next.controller.state().reports.filter(r=>r.stage==='coder').length,1);
 });
 test('final release failure still blocks after all tasks, without replaying coders',async()=>{
  const h=harness();const p={...plan,tasks:[{...plan.tasks[0],checks:['node task-test.mjs']},{...plan.tasks[0],checks:['node later-test.mjs']}],checks:['node release-test.mjs']};
@@ -1619,4 +1692,106 @@ for(const change of ['unchanged','foreign-owner','foreign-repository','stale-rou
  assert.equal(h.controller.state().round,1);assert.ok(h.controller.state().coding[0].spentMs>=1234);
  assert.equal(h.controller.state().reports.filter(r=>r.runId==='recovery-review').length,1);assert.equal(h.controller.state().correctionReviewPending,undefined);
  assert.match(h.calls.find(c=>c.params?.agent==='delivery-coder').params.task,/attached defect/);
+});
+
+// Scoped host timeout recovery: deliberately distinct from worker/coding recovery.
+async function hostTimeoutFixture({stage='final-checks',commands=['node first','node suite','node brakeman'],gitPolicy={workingBranch:'feature/fixture',expectedHead:'hash',commits:[{hash:'hash'}]}}={}) {
+ const h=harness();
+ h.entries.push(oldRunEntry(stage,routes,{plan:{...plan,checks:commands},round:0,reason:'',gitPolicy}));
+ const runs=[];
+ h.deps.verifyCommand=async(_root,command,_signal,timeoutMs)=>{runs.push({command,timeoutMs});return {command,code:command==='node suite' && timeoutMs!==900000?null:0,terminated:command==='node suite' && timeoutMs!==900000,terminationReason:command==='node suite' && timeoutMs!==900000?'timeout':null,processClosed:true,output:'receipt'};};
+ await h.events.session_start({},h.ctx);
+ await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ return {...h,runs,override:{stage,task:0,index:1,command:'node suite',timeoutMs:900000}};
+}
+test('closed host timeout resumes only outstanding checks with one exact approved deadline',async()=>{
+ const h=await hostTimeoutFixture(),before=structuredClone(h.controller.state());let confirms=0;
+ assert.equal(before.stage,'blocked');
+ h.ctx.ui.confirm=async(_title,text)=>{confirms++;for(const exact of ['node suite','120000','900000','final-checks','node brakeman'])assert.ok(text.includes(exact));return true;};
+ await h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx);await h.controller.settled();
+ assert.deepEqual(h.runs,[{command:'node first',timeoutMs:120000},{command:'node suite',timeoutMs:120000},{command:'node suite',timeoutMs:900000},{command:'node brakeman',timeoutMs:120000}]);
+ assert.equal(confirms,1);assert.equal(h.controller.state().stage,'complete');assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-reviewer','delivery-security']); // outstanding aggregate gates only
+ assert.deepEqual(h.controller.state().gitPolicy,before.gitPolicy);assert.deepEqual(h.controller.state().timeouts,before.timeouts);
+ assert.deepEqual(h.controller.state().reports.slice(0,before.reports.length),before.reports);
+});
+for(const bad of ['cancel','no-ui','command','fraction','infinite','maximum','snapshot','head','session','stage','round','commands','config','new-turn','shutdown','active','running','reason','reload'])test(`host timeout override guard: ${bad}`,async()=>{
+ const h=await hostTimeoutFixture(),before=structuredClone(h.controller.state());
+ if(bad==='reload')await h.events.session_start({},h.ctx);
+ if(bad==='no-ui')h.ctx.hasUI=false;
+ if(bad==='command')h.override.command='unknown';
+ if(bad==='fraction')h.override.timeoutMs=900000.1;
+ if(bad==='infinite')h.override.timeoutMs=Infinity;
+ if(bad==='maximum')h.override.timeoutMs=1800001;
+ if(['active','running','reason'].includes(bad)) {
+  const entry=structuredClone(h.entries.at(-1));
+  if(bad==='active')entry.data.active={id:'live',stage:'coder',model:routes.coder};
+  if(bad==='running')entry.data.checkProgress.pending=true;
+  if(bad==='reason')entry.data.checkProgress.attempts.at(-1).terminationReason='signal';
+  h.entries.push(entry);await h.events.session_start({},h.ctx);
+ }
+ h.ctx.ui.confirm=async()=>{
+  if(bad==='snapshot')h.deps.fingerprint=()=> 'changed';
+  if(bad==='head')h.deps.branchState=()=>({branch:'feature/fixture',head:'changed'});
+  if(bad==='session')h.ctx.sessionManager.getSessionId=()=> 'changed';
+  if(bad==='config')h.config.timeouts={commandMs:180000};
+  if(bad==='new-turn')await h.events.input({text:'Stop',source:'interactive'},h.ctx);
+  if(bad==='shutdown')await h.events.session_shutdown();
+  if(['stage','round','commands'].includes(bad)) {
+   const entry=structuredClone(h.entries.at(-1));
+   if(bad==='stage')entry.data.resumeStage='checks';
+   if(bad==='round')entry.data.round++;
+   if(bad==='commands')entry.data.plan.checks.reverse();
+   h.entries.push(entry);await h.events.session_start({},h.ctx);
+  }
+  return bad!=='cancel';
+ };
+ const action=h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx);
+ if(bad==='reload') {await action;await h.controller.settled();assert.equal(h.controller.state().stage,'complete');}
+ else {await assert.rejects(action,/timeout|confirm|UI|changed|closed|owned|pending|session/i);assert.equal(h.runs.length,2);assert.deepEqual(h.controller.state().timeouts,before.timeouts);}
+});
+test('final verification timeout finishes without replaying coding or accepted reviews',async()=>{
+ const h=await hostTimeoutFixture({stage:'verification',gitPolicy:null});const before=structuredClone(h.controller.state());
+ await h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.equal(h.calls.length,0);
+ assert.deepEqual(h.controller.state().reports,before.reports);assert.equal(h.controller.state().checkProgress,undefined);
+});
+test('repeated command strings have separate deadlines and persisted authorized retries do not leak',async()=>{
+ const h=await hostTimeoutFixture({stage:'verification',gitPolicy:null,commands:['node first','node suite','node suite']});
+ await h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'blocked');assert.equal(h.controller.state().checkProgress.index,2);
+ assert.deepEqual(h.runs.map(r=>r.timeoutMs),[120000,120000,900000,120000]);
+ await h.events.session_start({},h.ctx);
+ await assert.rejects(h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx),/exact retained/);
+ assert.equal(h.controller.state().checkProgress.overrides[1],900000);assert.equal(h.controller.state().checkProgress.overrides[2],undefined);
+ await h.tools.delivery_resume.execute('r',{commandTimeout:{...h.override,index:2}},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'complete');assert.equal(h.controller.state().timeouts.commandMs,120000);
+});
+test('reload after the last closed pass preserves the completed verification cursor',async()=>{
+ const h=await hostTimeoutFixture({stage:'verification',gitPolicy:null});
+ await h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx);await h.controller.settled();
+ const receipt=h.entries.findLast(e=>e.data.stage==='verification' && e.data.checkProgress?.index===3);
+ assert.ok(receipt);const next=harness();next.entries.push(receipt);let executions=0;
+ next.deps.verifyCommand=async()=>{executions++;return {code:0};};await next.events.session_start({},next.ctx);
+ await next.tools.delivery_resume.execute('r',{},null,null,next.ctx);await next.controller.settled();
+ assert.equal(next.controller.state().stage,'complete');assert.equal(executions,0);assert.equal(next.calls.length,0);
+});
+test('plain resume retries retained timeout with unchanged budget and does not replay earlier passes',async()=>{
+ const h=await hostTimeoutFixture();await h.tools.delivery_resume.execute('r',{},null,null,h.ctx);await h.controller.settled();
+ assert.deepEqual(h.runs.map(r=>r.command),['node first','node suite','node suite']);assert.ok(h.runs.every(r=>r.timeoutMs===120000));
+});
+for(const change of [{index:0},{task:1},{stage:'checks'},{timeoutMs:59999},{timeoutMs:120000},{timeoutMs:'900000'},{timeoutMs:NaN},{approved:true}])test(`invalid timeout selection never confirms: ${JSON.stringify(change)}`,async()=>{
+ const h=await hostTimeoutFixture();let prompts=0;h.ctx.ui.confirm=async()=>{prompts++;return true;};
+ await assert.rejects(h.tools.delivery_resume.execute('r',{commandTimeout:{...h.override,...change}},null,null,h.ctx),/commandTimeout/);
+ assert.equal(prompts,0);assert.equal(h.runs.length,2);
+});
+test('a resumed final check cannot bless source mutations using stale review approvals',async()=>{
+ const h=await hostTimeoutFixture({stage:'verification',gitPolicy:null});
+ h.deps.verifyCommand=async()=>{h.deps.fingerprint=()=> 'mutated';return {code:0,output:'pass',processClosed:true};};
+ await h.tools.delivery_resume.execute('r',{commandTimeout:h.override},null,null,h.ctx);await h.controller.settled();
+ assert.equal(h.controller.state().stage,'blocked');assert.match(h.controller.state().reason,/changed reviewed source/);assert.equal(h.calls.length,0);
+});
+test('legacy SIGKILL without scoped host closure evidence fails closed with actionable explanation',async()=>{
+ const h=harness();h.entries.push(oldRunEntry('blocked',routes,{checks:[{command:'node --test',code:null,signal:'SIGKILL',terminated:true}]}));await h.events.session_start({},h.ctx);
+ await assert.rejects(h.tools.delivery_resume.execute('r',{commandTimeout:{stage:'verification',task:0,index:0,command:'node --test',timeoutMs:900000}},null,null,h.ctx),/legacy SIGKILL alone does not prove a timeout/);
+ assert.equal(h.calls.length,0);
 });

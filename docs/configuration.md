@@ -49,9 +49,41 @@ New implementation plans supply `changeType: feature|bug|chore` and bind `review
 
 ## Bounded safe recovery
 
+### One retained host-check timeout
+
+Do not edit `delivery.json` to recover a single slow check. Inspect `delivery_status`, then request the exact retained check using the `delivery_resume` tool, for example:
+
+```json
+{"commandTimeout":{"stage":"verification","task":0,"index":1,"command":"bundle exec rails test","timeoutMs":900000}}
+```
+
+`task` and ordered check `index` are zero-based; copy the exact stage and command from status. The increased deadline must be a finite integer from 60000 through 1800000 ms (30 minutes maximum). One native confirmation displays the command, old/new deadline, retained stage and remaining commands. Only that check gets the override; e.g. Brakeman keeps its original deadline. Global/project configuration, coding/correction budgets, routes and review scope do not change. This does not authorize code fixes or mark a timeout as passing.
+
+The session journal retains the ordered verification cursor, attempts and override across reload. Earlier passing checks are reused only for the identical session, repository, stage, task/round, ordered commands, snapshot, HEAD and retained review/candidate bindings. Successful final verification completes normally; outstanding aggregate reviews still run when required by the existing lifecycle. Plain resume retries outstanding checks at their existing deadlines.
+
+Recovery requires a persisted, conclusively closed host timeout receipt. An arbitrary SIGKILL is not proof of a deadline. Legacy journals missing the scoped cursor/closure evidence explain that limitation rather than guessing; live or unknown host/worker attempts remain blocked. Inspect current-session native receipts/status, not silence. No UI means no override: reopen the same session in interactive Pi or an RPC client supporting confirmation. Changed state during confirmation invalidates it. Never repair session JSON or raise global timeouts to bypass these checks.
+
 Safe recovery uses the existing approval, not a new mode. A known read-only preflight rejection proving non-launch retries once per task/round/stage with unchanged routes, fallbacks, scope and remaining budget. The persisted attempt marker is consumed before dispatch and survives reload; no repeated confirmation, coder replay or completed-check replay occurs. Unknown launches and exhausted retries remain blocked. Model-exclusion diagnostics do not authorize model substitution.
 
 Parent inspection uses `delivery_inspect` with `view: status|history` and optional character `offset` (40k-character pages). It has fixed argv, no shell or arbitrary arguments, no Git aliases, pager, fsmonitor, signature execution or optional index writes. Use `delivery_diff` for patches and read/search tools for source. Status inspection refuses effective Git configurations containing clean/process filters, since status can execute these commands; history and direct source reads remain available. This is not a general shell sandbox. Unrelated unsafe symlinks warn; required unsafe dependencies still block and targets are never repaired automatically.
+
+## Controlled preflight cleanup
+
+`delivery_cleanup` is a narrow tool, not a shell escape or automatic cleanup setting:
+
+1. `phase: inspect, paths: ["exact/relative/path"]` reads tracking and content, returns the exact inventory, SHA-256 snapshot, current session/repository/branch/HEAD binding, token and external recovery intent. No files are moved or created.
+2. `phase: apply, token: "<returned token>"` shows one native confirmation: move the named paths to the displayed recoverable backup, and confirm no other process is writing to them. Cancel when writer ownership is unknown. Model-supplied consent and cleanup keywords cannot bypass confirmation. TUI or an RPC client implementing native confirmations is required.
+3. Apply revalidates the binding and contents, fsyncs validated regular-file payloads and then candidate directories bottom-up before any relocation (failing closed on errors), creates a private sibling `.pi-delivery-recovery-<token>` directory exclusively, writes/fsyncs `manifest.json` and `events.jsonl` before moving anything, then atomically renames each exact path. It journals partial progress and rechecks status. It does not commit, stash, reset, delete or launch workers. We never delete backups or classify artifacts as disposable by basename, including `.claude-flow`, `.swarm` and `ruvector.db`.
+
+The manifest gives exact absolute `source` and `destination` recovery paths. After interruption, compare both locations with the manifest and append journal; an interrupted `moving` record may already have moved. Restore each destination only when its original source is absent. If occupied, keep both copies and restore to another empty location. Recovery never requires deletion or overwriting. There is no automatic rollback, restore tool or partial-operation replay. Backup contents survive extension restart; in-memory inspection tokens do not. A successful token replay in the same session returns its receipt without another confirmation or move.
+
+Cleanup never grants implementation authority. The planner may retry only the same preflight-blocked proposal under the original real-user intent; changed proposals or material bindings require fresh intent. Planning-only remains planning-only. Cleanup does not renew a previously fingerprinted Markdown-file execution request; that request must be rebound through the existing execution gate after the workspace changes. No cleanup approval is repeated merely to retry a proposal.
+
+Limits are deliberately conservative: 1–20 non-overlapping relative paths, at most 100 inventory entries / 16 MiB; no glob, root, traversal, control-character or metadata paths. All tracked/staged dirt blocks cleanup. Candidates must be visible untracked files/directories with no ignored contents, symlinks/ancestors, hardlinks, special files or nested repositories. `.git`, Git control files, `.pi` and `.spark` stay protected. Linked/separate Git dirs, common-dir worktrees, detached/unborn HEAD, cross-device moves and configured clean/process filters are refused. No filter/hook/shell is executed by cleanup inspection. Active/unresolved or retained unfinished delivery ownership blocks cleanup; completed historical runs alone do not. Existing dirty-work adoption rules are unchanged.
+
+This is a trusted-session safeguard, not an OS sandbox or a process detector. The user must stop competing writers, including other sessions. Native confirmation is the writer assertion; it cannot make a hostile concurrent filesystem race safe. Renames are atomic per path, not transactional across the entire inventory. The writable worktree parent must be on the same filesystem and support directory fsync. No copy-and-delete fallback is attempted. Keep recovery directories until you decide what to retain.
+
+Durability covers process interruption and host crash/power loss only on filesystems and storage that honor successful file and directory fsyncs and atomic same-filesystem rename. Before any move, every candidate regular file is opened without following symlinks, checked against its inspected identity/content and fsynced; candidate directories are then fsynced bottom-up. Any payload sync error aborts before creating a backup or relocating any source. Manifest/journal synchronization and post-rename source-parent and backup-directory fsyncs remain required before recording completed moves. A crash before those barriers finish can leave the current move at either location; inspect both against the durable manifest. Recently written data is not guaranteed durable before the payload barriers complete. Hardware failure, lying device caches, unsupported/network filesystem semantics and competing writers are outside this guarantee. Tests verify synchronization ordering and error handling; abrupt subprocess exit tests do not simulate power loss or validate storage hardware.
 
 ## Model connection recovery
 
