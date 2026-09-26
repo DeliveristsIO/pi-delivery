@@ -17,6 +17,29 @@ test('completed review guidance avoids permission-to-plan questions without gran
  assert.match(text,/implementation still requires.*approval/i);
 });
 
+test('agent prompts preserve quality gates and evidence discipline',()=>{
+ const coder=readFileSync(resolve(root,'agents/delivery-coder.md'),'utf8');
+ assert.match(coder,/TDD\/debugging\/verification/);assert.match(coder,/changed files, acceptance coverage, exact checks\/results/i);
+ assert.match(coder,/blocked verdict only for genuinely ambiguous outcomes/i);
+ const reviewer=readFileSync(resolve(root,'agents/delivery-reviewer.md'),'utf8');
+ assert.match(reviewer,/Do not trust coder claims/i);assert.match(reviewer,/Missing evidence is uncertainty/i);
+ assert.match(reviewer,/Reject shallow approvals/i);
+ const security=readFileSync(resolve(root,'agents/delivery-security.md'),'utf8');
+ assert.match(security,/Threat-model the change/i);assert.match(security,/attacker-controlled input/i);
+ assert.match(security,/exploit preconditions, attack path, impact, and remediation/i);
+});
+
+test('skills preserve high-quality planning, security and exact route guidance',()=>{
+ const orchestration=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
+ assert.match(orchestration,/clear instructions.*concrete acceptance.*task-specific executable checks/i);
+ assert.match(orchestration,/shallow approvals, fabricated evidence, behavior drift/i);
+ const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');
+ assert.match(security,/Threat-model before approving/i);assert.match(security,/exploit preconditions, impact and remediation/i);
+ const models=readFileSync(resolve(root,'skills/select-task-model/SKILL.md'),'utf8');
+ assert.match(models,/Availability is not successful inference, quality proof, price proof or task qualification/i);
+ assert.match(models,/Route changes require a new displayed approval/i);
+});
+
 test('public documentation relative links resolve',()=>{
  for(const name of ['README.md','CONTRIBUTING.md','SECURITY.md','tests/README.md','docs/configuration.md','docs/roadmap.md','docs/releasing.md']) {
   const path=resolve(root,name),text=readFileSync(path,'utf8');

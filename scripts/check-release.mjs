@@ -15,11 +15,17 @@ export function scanText(text) {
  ];
  return patterns.filter(([,pattern])=>pattern.test(text)).map(([name])=>name);
 }
+export function npmPackFiles(packJson) {
+ const parsed=JSON.parse(packJson);
+ const entry=Array.isArray(parsed)?parsed[0]:Object.values(parsed)[0];
+ if(!entry?.files)throw new Error('npm pack --json output did not include files');
+ return entry.files.map(f=>f.path);
+}
 function main() {
  const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
  const pkg=JSON.parse(readFileSync(resolve(root,'package.json'),'utf8'));
  const source=execFileSync('git',['-c','core.fsmonitor=false','ls-files','--cached','--others','--exclude-standard','-z'],{cwd:root,encoding:'utf8'}).split('\0').filter(Boolean);
- const packed=JSON.parse(execFileSync('npm',['pack','--dry-run','--ignore-scripts','--offline','--json'],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe']}))[0].files.map(f=>f.path);
+ const packed=npmPackFiles(execFileSync('npm',['pack','--dry-run','--ignore-scripts','--offline','--json'],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe']}));
  const allowed=new Set([...pkg.files,'package.json']);
  const errors=[];
  for(const name of packed)if(!allowed.has(name))errors.push(`${name}: not in publication allowlist`);
