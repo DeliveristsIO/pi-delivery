@@ -24,17 +24,18 @@ export function saveConfig(path,c) {
   finally {if(existsSync(temp)) unlinkSync(temp);}
 }
 
+function assertSafeFilters(root) {
+  // Status/diff may run clean/process drivers even with optional locks disabled.
+  // Query effective outer config (including includes) without invoking any driver.
+  let filters='';
+  try {filters=execFileSync('git',['-C',root,'config','--null','--name-only','--get-regexp','^filter\\..*\\.(clean|process)$'],{encoding:'utf8',timeout:15000,maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});}
+  catch(error) {if(error.status!==1)throw error;}
+  if(filters)throw new Error('Status inspection cannot safely run with configured Git filters; use history inspection or read source files directly.');
+}
 export function inspectRepository(root,view='status',offset=0) {
   if(!['status','history'].includes(view))throw new Error('Invalid inspection view; use status or history.');
   if(!Number.isSafeInteger(offset) || offset<0)throw new Error('Invalid inspection offset.');
-  if(view==='status') {
-    // Status may run clean/process drivers even with optional locks disabled.
-    // Query effective config (including includes) without invoking any driver.
-    let filters='';
-    try {filters=execFileSync('git',['-C',root,'config','--null','--name-only','--get-regexp','^filter\\..*\\.(clean|process)$'],{encoding:'utf8',timeout:15000,maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});}
-    catch(error) {if(error.status!==1)throw error;}
-    if(filters)throw new Error('Status inspection cannot safely run with configured Git filters; use history inspection or read source files directly.');
-  }
+  if(view==='status')assertSafeFilters(root);
   const args=view==='status'
     ? ['status','--short','--branch','--untracked-files=all','--ignore-submodules=all']
     : ['log','-20','--no-show-signature','--no-decorate','--format=%h %s'];
@@ -72,31 +73,57 @@ function git(root,args) {
 export function repoRoot(cwd) {return realpathSync(git(cwd,['rev-parse','--show-toplevel']).trim());}
 const hash=value=>createHash('sha256').update(value).digest('hex');
 export function snapshot(root) {
-  // Refuse filters before status/diff can execute repository-configured code.
-  inspectRepository(root);
+  // No status crawl before opaque boundaries have been identified.
+  assertSafeFilters(root);
   const files=git(root,['ls-files','-z','--cached','--others','--exclude-standard']).split('\0').filter(Boolean);
   if(files.length>50000)throw new Error('Workspace exceeds 50000 files');
   const result=Object.create(null);let bytes=0;
-  result['.git/index']=hash(git(root,['ls-files','--stage','-z']));
+  const index=git(root,['ls-files','--stage','-z']);
+  result['.git/index']=hash(index);
+  const gitlinks=new Set(index.split('\0').filter(entry=>entry.startsWith('160000 ')).map(entry=>entry.slice(entry.indexOf('\t')+1)));
+  // Identity only, not contents/mtime: never enter a boundary or read its Git configuration.
+  const opaque=(file,st)=>{result[file]='opaque-directory:'+hash(JSON.stringify([file,st.dev,st.ino,st.mode]));};
   try {result['.git/HEAD']=hash(git(root,['rev-parse','--verify','--quiet','HEAD']).trim());}
   catch(error){if(error.status!==1)throw error;result['.git/HEAD']='unborn';}
-  for(const file of [...new Set(files)].sort()) {
+  entries: for(const entry of [...new Set(files)].sort()) {
+    // ls-files emits untracked embedded repositories with '/', but cached gitlinks without it.
+    const file=entry.endsWith('/')?entry.slice(0,-1):entry;
+    if(isAbsolute(file) || file.split('/').some(part=>['','..','.'].includes(part)))throw new Error('Unsafe snapshot path');
     const path=resolve(root,file);let st;
-    try {st=lstatSync(path);}catch(e){if(e.code==='ENOENT'){result[file]='deleted';continue;}throw e;}
-    if(realpathSync(dirname(path))!==dirname(path))throw new Error(`Symlink ancestor not supported: ${file}`);
+    // Check ancestry before lstat/read so even a missing leaf cannot hide a symlink escape.
+    let ancestor=root,relative='';
+    for(const part of file.split('/').slice(0,-1)) {
+      ancestor=join(ancestor,part);relative=relative?relative+'/'+part:part;
+      if(result[relative]?.startsWith('opaque-directory:'))continue entries;
+      let parent;
+      try {parent=lstatSync(ancestor);if(parent.isSymbolicLink())throw new Error(`Symlink ancestor not supported: ${file}`);}
+      catch(e){if(e.code!=='ENOENT')throw e;break;}
+      // Outer tracked descendants can hide an embedded repo from ls-files' directory entries.
+      try {
+        const metadata=lstatSync(join(ancestor,'.git'));
+        if(!metadata.isDirectory() && !metadata.isFile() && !metadata.isSymbolicLink())throw new Error(`Unsafe non-file Git boundary: ${relative}`);
+        opaque(relative,parent);continue entries;
+      }catch(e){if(e.code!=='ENOENT')throw e;}
+    }
+    try {st=lstatSync(path);}catch(e){if(e.code==='ENOENT'){result[file]=gitlinks.has(file)?'opaque-directory:missing':'deleted';continue;}throw e;}
     if(st.isSymbolicLink()){result[file]='symlink:'+hash(readlinkSync(path));continue;}
-    if(!st.isFile())throw new Error(`Nested repository or non-file entry requires separate review: ${file}`);
+    if(st.isDirectory() && (entry.endsWith('/') || gitlinks.has(file))) {
+      opaque(file,st);continue;
+    }
+    if(!st.isFile() || gitlinks.has(file))throw new Error(`Unsafe non-file entry or non-directory gitlink requires separate review: ${file}`);
     bytes+=st.size;if(bytes>256*1024*1024)throw new Error('Workspace exceeds 256 MiB');
     result[file]=hash(Buffer.concat([Buffer.from(String(st.mode)+':'),readFileSync(path)]));
   }
   return result;
 }
-export function workingTreeEvidence(root) {
-  const status=inspectRepository(root);
+export function workingTreeEvidence(root,current=snapshot(root)) {
+  assertSafeFilters(root);
+  const excluded=Object.keys(current).filter(path=>current[path].startsWith('opaque-directory:')).map(path=>`:(literal,exclude)${path}`);
+  const status=git(root,['-c','core.quotePath=true','status','--short','--branch','--untracked-files=all','--ignore-submodules=all','--','.',...excluded]);
   let head=[];
   try {git(root,['rev-parse','--verify','--quiet','HEAD']);head=['HEAD'];}catch(error){if(error.status!==1)throw error;}
-  const patch=git(root,['diff','--no-ext-diff','--no-textconv',...head,'--']);
-  const text=`STATUS (includes untracked paths; read their source directly):\n${status}\nTRACKED DIFF:\n${patch}`;
+  const patch=git(root,['diff','--no-ext-diff','--no-textconv','--ignore-submodules=all',...head,'--','.',...excluded]);
+  const text=`STATUS (includes untracked paths; read source only outside opaque boundaries):\n${status}\nTRACKED DIFF${excluded.length?' (opaque nested boundaries excluded; contents not reviewed)':''}:\n${patch}`;
   return text.slice(0,40000)+(text.length>40000?'\n[Diff clipped. Read the approved source files; do not infer a clean review from this preview.]':'');
 }
 const lockPath=root=>join(agentDir(),'delivery-locks',hash(realpathSync(root))+'.json');

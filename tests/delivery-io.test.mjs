@@ -7,6 +7,7 @@ import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {loadConfig,saveConfig,snapshot,repoRoot,readOutcome} from '../extensions/delivery/io.mjs';
 import * as io from '../extensions/delivery/io.mjs';
+import {assertScope} from '../extensions/delivery/policy.mjs';
 const inspectRepository=(...args)=>io.inspectRepository(...args);
 import {rpc} from '../extensions/delivery/rpc.mjs';
 function fixture(t) {const d=mkdtempSync(join(tmpdir(),'delivery-test-'));t.after(()=>rmSync(d,{recursive:true,force:true}));return d;}
@@ -64,6 +65,7 @@ test('controlled status refuses clean and process filters without executing them
   git('config',`filter.probe.${kind}`,`touch '${marker}'; cat`);
   writeFileSync(join(d,'a'),'changed\n');const later=new Date(Date.now()+5000);utimesSync(join(d,'a'),later,later);
   assert.throws(()=>inspectRepository(d,'status'),/configured Git filters.*history/i);
+  assert.throws(()=>snapshot(d),/configured Git filters/i);assert.throws(()=>io.workingTreeEvidence(d,{}),/configured Git filters/i);
   assert.match(inspectRepository(d,'history'),/base/);
   assert.throws(()=>readFileSync(marker),/ENOENT/);assert.deepEqual(readFileSync(join(d,'.git/index')),index);
  }
@@ -116,4 +118,46 @@ test('native outcome requires exact bound owner and run, never a parent UUID/pat
  for(const nativeSession of [undefined,null,'','   ',42])assert.throws(()=>readOutcome({...active,nativeSession}),/owner-session/);
  for(const sessionId of [active.session,join(d,'foreign.jsonl'),null]){status.sessionId=sessionId;write();assert.throws(()=>readOutcome(active),/owner-session/);}
  status.sessionId=active.nativeSession;status.runId='foreign-run';write();assert.throws(()=>readOutcome(active),/run-ID/);
+});
+
+for(const tracked of [false,true])test(`snapshot treats ${tracked?'tracked gitlink':'untracked embedded repo'} as an opaque boundary without reading its contents/config`,t=>{
+ const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args]);git('init','-q');
+ const nested=join(d,'vendor','nested');execFileSync('git',['init','-q',nested]);
+ writeFileSync(join(nested,'source'),'private nested contents');
+ execFileSync('git',['-C',nested,'add','source']);execFileSync('git',['-C',nested,'-c','user.name=T','-c','user.email=t@x','commit','-qm','nested']);
+ if(tracked)git('add','vendor/nested');
+ const marker=join(d,'executed');execFileSync('git',['-C',nested,'config','core.fsmonitor',`!touch ${marker}`]);
+ execFileSync('git',['-C',nested,'config','filter.probe.clean',`touch ${marker}; cat`]);writeFileSync(join(nested,'.gitattributes'),'source filter=probe\n');
+ writeFileSync(join(d,'outer'),'outer');
+ const before=snapshot(d);assert.match(before['vendor/nested'],/^opaque-directory:/);assert.equal(before['vendor/nested/'],undefined);
+ assert.ok(!Object.keys(before).some(p=>p.startsWith('vendor/nested/')));
+ writeFileSync(join(nested,'source'),'changed but not fingerprinted');assert.deepEqual(snapshot(d),before);
+ assert.throws(()=>readFileSync(marker),/ENOENT/);
+ for(const scope of ['vendor','vendor/nested','vendor/nested/source'])assert.throws(()=>assertScope(before,[scope]),/opaque.*vendor\/nested.*run delivery in that repository/i);
+ assert.doesNotThrow(()=>assertScope(before,['outer']));
+ if(tracked){git('update-index','--cacheinfo','160000,1111111111111111111111111111111111111111,vendor/nested');assert.notEqual(snapshot(d)['.git/index'],before['.git/index']);}
+});
+test('snapshot still refuses FIFO and symlink ancestry without following targets',t=>{
+ const d=fixture(t);execFileSync('git',['init','-q',d]);execFileSync('git',['-C',d,'update-index','--add','--cacheinfo','100644,1111111111111111111111111111111111111111,fifo']);execFileSync('mkfifo',[join(d,'fifo')]);
+ assert.throws(()=>snapshot(d),/non-file|nonregular/i);rmSync(join(d,'fifo'));
+ const external=fixture(t);writeFileSync(join(external,'source'),'outside');
+ execFileSync('git',['-C',d,'update-index','--add','--cacheinfo','100644,1111111111111111111111111111111111111111,link/source']);
+ symlinkSync(external,join(d,'link'));assert.throws(()=>snapshot(d),/symlink ancestor/i);
+});
+
+test('missing gitlink remains an opaque scope boundary and non-directory gitlink replacement is refused',t=>{
+ const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args]);git('init','-q');
+ git('update-index','--add','--cacheinfo','160000,1111111111111111111111111111111111111111,nested');
+ assert.match(snapshot(d).nested,/^opaque-directory:/);assert.throws(()=>assertScope(snapshot(d),['nested/source']),/run delivery in that repository/i);
+ writeFileSync(join(d,'nested'),'not a repository directory');assert.throws(()=>snapshot(d),/non-file|gitlink/i);
+});
+
+test('outer tracked descendants do not cause traversal into a newly embedded nested repository',t=>{
+ const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args]);git('init','-q');
+ execFileSync('mkdir',['-p',join(d,'nested')]);writeFileSync(join(d,'nested','outer-tracked'),'outer');git('add','nested/outer-tracked');
+ execFileSync('git',['init','-q',join(d,'nested')]);writeFileSync(join(d,'nested','inner-untracked'),'inner');
+ const before=snapshot(d);assert.match(before.nested,/^opaque-directory:/);assert.ok(!Object.keys(before).some(path=>path.startsWith('nested/')));
+ writeFileSync(join(d,'nested','outer-tracked'),'contents outside coverage');assert.deepEqual(snapshot(d),before);
+ assert.throws(()=>assertScope(before,['nested/outer-tracked']),/run delivery in that repository/i);
+ assert.doesNotMatch(io.workingTreeEvidence(d),/contents outside coverage|nested\/inner-untracked|nested\/outer-tracked/);
 });

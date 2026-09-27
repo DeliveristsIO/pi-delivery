@@ -10,7 +10,7 @@ import {join} from 'node:path';
 
 const plan=()=>({mode:'implementation',title:'Bounded change',tasks:[{title:'One',instructions:'Implement one',files:['a'],acceptance:['Works'],checks:['task-one']}],checks:['final'],security:false});
 const approved={status:'approved',summary:'Inspected source and evidence',findings:[]};
-function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{},realLocksRoot,nativeStatus=()=>({state:'running'})}={}) {
+function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{},realLocksRoot,nativeStatus=()=>({state:'running'}),overrides={}}={}) {
  const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries],activeTools=[];let n=0;
  const models=['planning','coder','quality','security'].map(id=>({provider:'test',id}));
  const events={listeners:new Map(),on(k,f){this.listeners.set(k,f);return()=>this.listeners.delete(k);},emit(k,r){if(!k.endsWith(':request'))return;calls.push(r);let data={version:1,capabilities:{asyncSpawn:true,processTerminalProof:{version:1}},methods:['spawn','status','stop']};
@@ -22,7 +22,7 @@ function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,
  const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
  const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  if(realLocksRoot){ctx.cwd=realLocksRoot;deps.repoRoot=()=>realLocksRoot;deps.acquireLock=acquireLock;deps.releaseLock=releaseLock;}
- registerDelivery(pi,undefined,deps);
+ registerDelivery(pi,undefined,{...deps,...overrides});
  const invoke=(name,args={})=>tools[name].execute('call',args,undefined,undefined,ctx);
  const input=text=>handlers.input({text,source:'interactive'},ctx);
  const state=()=>saved.filter(e=>e.customType==='delivery-coordinator-v2').at(-1)?.data;
@@ -51,7 +51,7 @@ test('completed review continuation prepares the next plan without resume or per
 
 test('thin interface proposes without launching and questions never approve',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
- assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_plan','delivery_status','delivery_resume','delivery_stop'].sort());
+ assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_issues','delivery_plan','delivery_status','delivery_resume','delivery_stop'].sort());
  await h.invoke('delivery_plan',plan());await h.input('Can you implement this plan?');await assert.rejects(h.invoke('delivery_execute'),/approval/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
  await h.input('Plan only, do not implement');await assert.rejects(h.invoke('delivery_execute'),/approval/i);
 });
@@ -419,4 +419,33 @@ for(const outcome of ['complete','failed','stopped','stop requested','missing pr
  }
  assert.deepEqual(h.state().checks,retained.checks);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
  await h.handlers.session_shutdown();
+});
+
+
+test('pure issue research is available through active allowlist and hook without snapshot, proposal, approval or native launch',async()=>{
+ let reads=0;const h=harness({overrides:{snapshot:()=>assert.fail('research must not snapshot'),readIssues:async args=>{reads++;assert.deepEqual(args,{repo:'Owner/repo',limit:5});return {content:[{type:'text',text:'Untrusted issue data'}],details:{issues:[]}};}}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);
+ assert.ok(h.tools.delivery_issues);assert.ok(h.activeTools.includes('delivery_issues'));assert.equal(h.handlers.tool_call({toolName:'delivery_issues'}),undefined);
+ assert.equal(h.tools.delivery_issues.parameters.additionalProperties,false);assert.equal(h.tools.delivery_issues.parameters.properties.repo.type,'string');
+ await h.invoke('delivery_issues',{repo:'Owner/repo',limit:5});assert.equal(reads,1);assert.equal(h.state().plan,null);assert.equal(h.calls.length,0);
+ await assert.rejects(h.invoke('delivery_issues',{repo:'Owner/repo',command:'edit'}),/unsupported/);assert.equal(reads,1);
+ assert.match(h.handlers.before_agent_start().message.content,/issue.*delivery_issues.*without.*delivery_plan/i);
+});
+test('unrelated opaque directory coverage warning reaches proposal, reviewer and status while explicit nested scope fails',async()=>{
+ const h=harness({snapshot:{a:'hash','vendor/nested':'opaque-directory:identity'}});
+ const p=plan();p.mode='review';p.tasks[0].checks=[];p.checks=[];
+ const s=await executePlan(h,p);assert.equal(s.stage,'complete',s.reason);
+ for(const text of [h.messages[0].content,h.calls.find(c=>c.method==='spawn').params.task,textOf(await h.invoke('delivery_status'))]){
+  assert.match(text,/opaque.*vendor\/nested/i);assert.match(text,/contents.*not fingerprinted/i);assert.match(text,/do not traverse/i);
+ }
+ p.tasks[0].files=['vendor'];await assert.rejects(h.invoke('delivery_plan',p),/run delivery in that repository/i);
+});
+test('opaque coverage warning is bounded and counts omitted boundary paths',async()=>{
+ const snapshot={a:'hash',...Object.fromEntries(Array.from({length:100},(_,i)=>['nested-'+i+'x'.repeat(300),'opaque-directory:identity']))};
+ const h=harness({snapshot});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());
+ const text=textOf(await h.invoke('delivery_status'));assert.ok(text.length<=12000);assert.match(text,/opaque/i);assert.match(text,/omitted/i);
+});
+
+test('reviewer children do not register the issues tool or any coordinator authority',()=>{
+ const h=harness({overrides:{child:true}});assert.deepEqual(Object.keys(h.tools),[]);assert.deepEqual(Object.keys(h.commands),[]);
 });

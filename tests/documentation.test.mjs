@@ -73,3 +73,10 @@ test('current recovery guidance distinguishes observation, cancellation and rest
   assert.doesNotMatch(text,/different Pi process cannot reclaim/i);
  }
 });
+
+test('current docs separate issue research from approval and describe opaque nested coverage',()=>{
+ for(const file of ['README.md','docs/configuration.md','skills/orchestrate-delivery/SKILL.md']) {
+  const text=readFileSync(resolve(root,file),'utf8');assert.match(text,/delivery_issues/);assert.match(text,/OWNER\/REPO/);assert.match(text,/untrusted/i);assert.match(text,/not all.*issues|incomplete/i);
+  assert.match(text,/opaque/i);assert.match(text,/contents.*not fingerprinted/i);assert.match(text,/run delivery in that repository/i);
+ }
+});

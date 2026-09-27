@@ -10,21 +10,25 @@ export const PLAN_SCHEMA = object({
   checks, security:{type:'boolean'}
 });
 export const REPORT_SCHEMA = object({status:{type:'string',enum:['approved','changes_requested','blocked']},summary:string(8000),findings:list(string(2000),50)});
-export const SCHEMAS = {empty:object({}),plan:PLAN_SCHEMA,configure:object({routes:object(Object.fromEntries(ROLES.map(role=>[role,string(256)])),[])},[])};
+// GitHub.com only: explicit owner/repo, no URLs, traversal, flags or control characters.
+const ISSUE_REPO_PATTERN='^(?!.*\\.\\.)(?!.*[\\x00-\\x20\\x7f])[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$';
+export const SCHEMAS = {empty:object({}),plan:PLAN_SCHEMA,issues:object({repo:{...string(140),pattern:ISSUE_REPO_PATTERN},limit:{type:'integer',minimum:1,maximum:100}},['repo']),configure:object({routes:object(Object.fromEntries(ROLES.map(role=>[role,string(256)])),[])},[])};
 
 // The public JSON schemas and runtime share this small validator (no coercion).
 export function validate(schema,value,path='input') {
   if(schema.type==='object') {
-    if(!value || typeof value!=='object' || Array.isArray(value))throw new Error(`${path}: expected object`);
-    for(const key of schema.required)if(!(key in value))throw new Error(`${path}.${key}: required`);
+    if(!value || typeof value!=='object' || Array.isArray(value) || ![Object.prototype,null].includes(Object.getPrototypeOf(value)))throw new Error(`${path}: expected plain object`);
+    for(const key of schema.required)if(!Object.hasOwn(value,key))throw new Error(`${path}.${key}: required`);
     for(const key of Object.keys(value)) {
-      if(!schema.properties[key])throw new Error(`${path}.${key}: unsupported field`);
+      if(!Object.hasOwn(schema.properties,key))throw new Error(`${path}.${key}: unsupported field`);
       validate(schema.properties[key],value[key],`${path}.${key}`);
     }
   } else if(schema.type==='array') {
     if(!Array.isArray(value) || value.length<schema.minItems || value.length>schema.maxItems)throw new Error(`${path}: invalid array length`);
     value.forEach((item,i)=>validate(schema.items,item,`${path}[${i}]`));
-  } else if(typeof value!==schema.type || (schema.type==='string' && (!value.trim() || value.includes('\0') || value.length>(schema.maxLength ?? Infinity))) || (schema.enum && !schema.enum.includes(value)))throw new Error(`${path}: invalid ${schema.type}`);
+  } else if(schema.type==='integer') {
+    if(!Number.isSafeInteger(value) || value<schema.minimum || value>schema.maximum)throw new Error(`${path}: invalid integer`);
+  } else if(typeof value!==schema.type || (schema.type==='string' && (!value.trim() || value.includes('\0') || value.length>(schema.maxLength ?? Infinity) || (schema.pattern && !new RegExp(schema.pattern).test(value)))) || (schema.enum && !schema.enum.includes(value)))throw new Error(`${path}: invalid ${schema.type}`);
   return value;
 }
 export function validatePlan(input) {
@@ -71,5 +75,14 @@ export function assertCoderChanges(before,after) {
   return paths;
 }
 export function assertScope(snapshot,files) {
-  for(const [path,value] of Object.entries(snapshot))if(value.startsWith('symlink:') && (inScope(path,files) || files.some(file=>file.startsWith(path+'/'))))throw new Error(`Approved scope traverses an opaque symlink: ${path}. Resolve the dependency before approval.`);
+  for(const [path,value] of Object.entries(snapshot))if(inScope(path,files) || files.some(file=>file.startsWith(path+'/'))) {
+    if(value.startsWith('symlink:'))throw new Error(`Approved scope traverses an opaque symlink: ${path}. Resolve the dependency before approval.`);
+    if(value.startsWith('opaque-directory:'))throw new Error(`Scope intersects opaque nested boundary: ${path}. Run delivery in that repository for its own review/implementation; outer approval does not cover its contents.`);
+  }
+}
+export function snapshotCoverage(snapshot={}) {
+  const paths=Object.keys(snapshot).filter(path=>snapshot[path].startsWith('opaque-directory:')).sort();
+  if(!paths.length)return '';
+  const shown=paths.slice(0,10).map(path=>JSON.stringify(path.length>160?path.slice(0,160)+'…':path));
+  return `Opaque nested boundaries (${paths.length}): ${shown.join(', ')}${paths.length>10?`; ${paths.length-10} paths omitted`:''}. Contents are not fingerprinted or reviewed; do not traverse or modify these boundaries. Only directory identity and outer index gitlink revisions are covered. For nested work, run delivery in that repository.`;
 }

@@ -44,3 +44,10 @@ test('coder edits allow repository paths but never Git metadata or changed symli
  assert.throws(()=>assertCoderChanges(before,{...before,related:'symlink:escape'}),/symlink/);
  const removed={...before};delete removed.a;assert.deepEqual(assertCoderChanges(before,removed),['a']);
 });
+
+test('opaque boundaries reject intersecting scopes and coder additions/removal/replacement, not unrelated edits',()=>{
+ const before={outer:'old','vendor/nested':'opaque-directory:identity','.git/index':'gitlink-revision'};
+ assert.deepEqual(assertCoderChanges(before,{...before,outer:'new'}),['outer']);
+ for(const after of [{...before,'vendor/nested':'opaque-directory:replacement'},{outer:'old','.git/index':'gitlink-revision'},{...before,added:'opaque-directory:new'},{...before,'vendor/nested/source':'new'}])assert.throws(()=>assertCoderChanges(before,after),/opaque.*run delivery in that repository/i);
+ assert.throws(()=>assertCoderChanges(before,{...before,'.git/index':'new-revision'}),/Git metadata/);
+});
