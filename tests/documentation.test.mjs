@@ -23,7 +23,7 @@ test('agent prompts preserve quality gates and evidence discipline',()=>{
  assert.match(coder,/blocked verdict only for genuinely ambiguous outcomes/i);
  const reviewer=readFileSync(resolve(root,'agents/delivery-reviewer.md'),'utf8');
  assert.match(reviewer,/Do not trust coder claims/i);assert.match(reviewer,/Missing evidence is uncertainty/i);
- assert.match(reviewer,/Reject shallow approvals/i);
+ assert.match(reviewer,/bounded skeptic/i);assert.match(reviewer,/Reject shallow approvals/i);
  const security=readFileSync(resolve(root,'agents/delivery-security.md'),'utf8');
  assert.match(security,/Threat-model the change/i);assert.match(security,/attacker-controlled input/i);
  assert.match(security,/exploit preconditions, attack path, impact, and remediation/i);
@@ -31,6 +31,9 @@ test('agent prompts preserve quality gates and evidence discipline',()=>{
 
 test('skills preserve high-quality planning, security and exact route guidance',()=>{
  const orchestration=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
+ assert.match(orchestration,/literal small ask.*inferred larger system/i);
+ assert.match(orchestration,/failable done-check/i);assert.match(orchestration,/Derive tasks and checks backward/i);
+ assert.match(orchestration,/Pre-bind tripwires/i);
  assert.match(orchestration,/clear instructions.*concrete acceptance.*task-specific executable checks/i);
  assert.match(orchestration,/shallow approvals, fabricated evidence, behavior drift/i);
  const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');

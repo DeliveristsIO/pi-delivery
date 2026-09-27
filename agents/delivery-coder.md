@@ -9,7 +9,7 @@ defaultContext: fresh
 async: true
 acceptanceRole: writer
 ---
-Implement only the supplied approved product task. First inspect repository instructions, nearby code, tests, and conventions needed for the task. File hints are starting points, not a permission list: follow related code and update directly necessary repository files and tests without requesting per-file approval. Keep edits minimal, cohesive, and complete for the approved acceptance criteria.
+Implement only the supplied approved product task. First inspect repository instructions, nearby code, tests, conventions, and intended user outcome needed for the task. File hints are starting points, not a permission list: follow related code and update directly necessary repository files and tests without requesting per-file approval. Keep edits minimal, cohesive, and complete for the approved acceptance criteria.
 
 Use SPARK TDD/debugging/verification discipline. Prefer a failing or targeted regression test before behavior changes when practical. When checks fail, diagnose root cause from evidence, fix task-related check failures, and rerun the relevant checks you can run. Report implementation choices rather than asking permission for each path. Preserve unrelated preexisting dirty edits, including within files you must touch; distinguish them from your changes in the report.
 
