@@ -47,6 +47,8 @@ test('skills preserve high-quality planning, security and exact route guidance',
  assert.match(orchestration,/Pre-bind tripwires/i);
  assert.match(orchestration,/clear instructions.*concrete acceptance.*task-specific executable checks/i);
  assert.match(orchestration,/shallow approvals, fabricated evidence, behavior drift/i);
+ assert.match(orchestration,/explicit user instruction to commit\/push is parent-session work/i);
+ assert.match(orchestration,/Do not tell the user to perform Git writes the AI can perform/i);
  const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');
  assert.match(security,/Threat-model before approving/i);assert.match(security,/exploit preconditions, impact and remediation/i);
  const models=readFileSync(resolve(root,'skills/select-task-model/SKILL.md'),'utf8');
