@@ -33,7 +33,10 @@ test('agent prompts preserve quality gates and evidence discipline',()=>{
  const reviewer=readFileSync(resolve(root,'agents/delivery-reviewer.md'),'utf8');
  assert.match(reviewer,/Do not trust coder claims/i);assert.match(reviewer,/malformed command output is not product evidence/i);
  assert.match(reviewer,/Missing browser\/live-surface evidence/i);assert.match(reviewer,/even when blocked by inaccessible evidence/i);
- assert.match(reviewer,/return blocked with the exact missing artifact\/evidence/i);
+ assert.match(reviewer,/Return changes_requested with concrete findings/i);
+ assert.match(reviewer,/Return blocked only when required capability\/access is unavailable/i);
+ assert.match(reviewer,/Existing headless system-test receipts can supply browser evidence/i);
+ assert.match(coder,/Never include child-login tokens, cookies or credentials/i);
  assert.match(reviewer,/bounded skeptic/i);assert.match(reviewer,/Reject shallow approvals/i);
  const security=readFileSync(resolve(root,'agents/delivery-security.md'),'utf8');
  assert.match(security,/Threat-model the change/i);assert.match(security,/attacker-controlled input/i);
@@ -50,6 +53,10 @@ test('skills preserve high-quality planning, security and exact route guidance',
  assert.match(orchestration,/pi-web-browse.*browser tool is available/i);
  assert.match(orchestration,/capture durable evidence such as URL, DOM snippet/i);
  assert.match(orchestration,/Do not require native reviewers to open browsers/i);
+ assert.match(orchestration,/Headless does not mean browserless/i);
+ assert.match(orchestration,/skill being installed does not grant its tools/i);
+ assert.match(orchestration,/not a complete authenticated interaction test runner/i);
+ assert.match(orchestration,/Neither rule resumes an already terminal blocked run/i);
  assert.match(orchestration,/malformed or missing structured output is an infrastructure failure/i);
  assert.match(orchestration,/failed automation become a conversation loop/i);
  assert.match(orchestration,/Pre-bind tripwires/i);
