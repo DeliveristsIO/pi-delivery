@@ -20,9 +20,12 @@ test('completed review guidance avoids permission-to-plan questions without gran
 test('agent prompts preserve quality gates and evidence discipline',()=>{
  const coder=readFileSync(resolve(root,'agents/delivery-coder.md'),'utf8');
  assert.match(coder,/TDD\/debugging\/verification/);assert.match(coder,/changed files, acceptance coverage, exact checks\/results/i);
+ assert.match(coder,/Validate command syntax/i);assert.match(coder,/rather than asking the user to inspect DOM/i);
  assert.match(coder,/blocked verdict only for genuinely ambiguous outcomes/i);
  const reviewer=readFileSync(resolve(root,'agents/delivery-reviewer.md'),'utf8');
- assert.match(reviewer,/Do not trust coder claims/i);assert.match(reviewer,/Missing evidence is uncertainty/i);
+ assert.match(reviewer,/Do not trust coder claims/i);assert.match(reviewer,/malformed command output is not product evidence/i);
+ assert.match(reviewer,/Missing browser\/live-surface evidence/i);assert.match(reviewer,/even when blocked by inaccessible evidence/i);
+ assert.match(reviewer,/return blocked with the exact missing artifact\/evidence/i);
  assert.match(reviewer,/bounded skeptic/i);assert.match(reviewer,/Reject shallow approvals/i);
  const security=readFileSync(resolve(root,'agents/delivery-security.md'),'utf8');
  assert.match(security,/Threat-model the change/i);assert.match(security,/attacker-controlled input/i);
@@ -31,8 +34,16 @@ test('agent prompts preserve quality gates and evidence discipline',()=>{
 
 test('skills preserve high-quality planning, security and exact route guidance',()=>{
  const orchestration=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
+ assert.match(orchestration,/durable Markdown before implementation/i);
+ assert.match(orchestration,/docs\/spark\/specs\/YYYY-MM-DD-<topic>-design\.md/i);
  assert.match(orchestration,/literal small ask.*inferred larger system/i);
  assert.match(orchestration,/failable done-check/i);assert.match(orchestration,/Derive tasks and checks backward/i);
+ assert.match(orchestration,/Validate executable check syntax/i);assert.match(orchestration,/browser\/live-surface verification/i);
+ assert.match(orchestration,/pi-web-browse.*browser tool is available/i);
+ assert.match(orchestration,/capture durable evidence such as URL, DOM snippet/i);
+ assert.match(orchestration,/Do not require native reviewers to open browsers/i);
+ assert.match(orchestration,/malformed or missing structured output is an infrastructure failure/i);
+ assert.match(orchestration,/failed automation become a conversation loop/i);
  assert.match(orchestration,/Pre-bind tripwires/i);
  assert.match(orchestration,/clear instructions.*concrete acceptance.*task-specific executable checks/i);
  assert.match(orchestration,/shallow approvals, fabricated evidence, behavior drift/i);
