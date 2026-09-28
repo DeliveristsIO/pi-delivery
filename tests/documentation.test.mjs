@@ -17,6 +17,14 @@ test('completed review guidance avoids permission-to-plan questions without gran
  assert.match(text,/implementation still requires.*approval/i);
 });
 
+test('approval mismatch guidance refreshes proposals instead of looping on approval',()=>{
+ const text=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
+ assert.match(text,/\.git\/HEAD.*moving after approval/i);
+ assert.match(text,/do not loop on repeated approval/i);
+ assert.match(text,/re-display the same scoped plan against the current workspace/i);
+ assert.match(text,/treat that as intent to refresh\/re-display, not execution authority/i);
+});
+
 test('agent prompts preserve quality gates and evidence discipline',()=>{
  const coder=readFileSync(resolve(root,'agents/delivery-coder.md'),'utf8');
  assert.match(coder,/TDD\/debugging\/verification/);assert.match(coder,/changed files, acceptance coverage, exact checks\/results/i);
