@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
-const resources=['skills/orchestrate-delivery','skills/security-review','skills/select-task-model','agents/delivery-coder.md','agents/delivery-reviewer.md','agents/delivery-security.md','extensions/delivery'];
+const resources=['skills/orchestrate-delivery','skills/security-review','skills/select-task-model','agents/delivery-coder.md','agents/delivery-reviewer.md','agents/delivery-security.md','agents/delivery-verifier.md','extensions/delivery'];
 const SUBAGENTS='npm:pi-subagents@0.67.0',SPARK='npm:@adityaaria/spark';
 const FRONTEND='npm:@sentiolabs/pi-frontend-design',OLLAMA='npm:pi-ollama-cloud';
 const SPECS=[SUBAGENTS,SPARK,FRONTEND,OLLAMA];

@@ -1,8 +1,8 @@
 import {terminalProof} from './helpers/native-artifacts.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,writeFileSync,readFileSync,symlinkSync,rmSync,utimesSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,symlinkSync,rmSync,utimesSync,existsSync} from 'node:fs';
+import {tmpdir,homedir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {loadConfig,saveConfig,snapshot,repoRoot,readOutcome} from '../extensions/delivery/io.mjs';
@@ -10,6 +10,7 @@ import * as io from '../extensions/delivery/io.mjs';
 import {assertScope} from '../extensions/delivery/policy.mjs';
 const inspectRepository=(...args)=>io.inspectRepository(...args);
 import {rpc} from '../extensions/delivery/rpc.mjs';
+import {proveNativePrelaunch} from '../extensions/delivery/prelaunch.mjs';
 function fixture(t) {const d=mkdtempSync(join(tmpdir(),'delivery-test-'));t.after(()=>rmSync(d,{recursive:true,force:true}));return d;}
 test('config default, atomic roundtrip, malformed input and symlink refusal', t=>{
  const d=fixture(t),p=join(d,'config.json');assert.deepEqual(loadConfig(p),{version:1,routes:{},repos:[]});
@@ -83,6 +84,22 @@ test('workspace lock excludes another session and never steals unknown ownership
  assert.throws(()=>io.acquireLock(d,{session:'two',run:'second'}),/owned/);
  assert.throws(()=>io.releaseLock(d,{session:'one',run:'wrong'}),/ownership/);
  io.releaseLock(d,owner);io.acquireLock(d,{session:'two',run:'second'});
+});
+test('pinned prelaunch refusal reconciles only exact stale owner lease',{skip:!existsSync(join(homedir(),'.pi/agent/npm/node_modules/pi-subagents/src/runs/background/async-execution.ts'))},t=>{
+ const d=fixture(t),agentDir=join(d,'agent'),repo=join(d,'repo'),old=process.env.PI_CODING_AGENT_DIR;
+ mkdirSync(join(agentDir,'npm/node_modules'),{recursive:true});mkdirSync(repo);
+ symlinkSync(join(homedir(),'.pi/agent/npm/node_modules/pi-subagents'),join(agentDir,'npm/node_modules/pi-subagents'));
+ process.env.PI_CODING_AGENT_DIR=agentDir;
+ t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
+ const owner={session:'retained',run:'run',pid:2147483647};owner.fence=io.acquireLock(repo,owner);
+ const current={...owner,pid:process.pid};
+ const active={id:null,dir:null,agent:'delivery-security',stage:'security',session:owner.session,nativeSession:'/parent.jsonl',startedAt:Date.now()};
+ const reason="Run fan-out: 1/64 used, 63 remaining\nAgent 'delivery-security' was given an implementation task, but its tool allowlist has no mutation-capable tools. Add bash, edit, write, or another mutation-capable tool to the agent, or use a read-only task/agent.";
+ const proof=proveNativePrelaunch(active,reason);
+ assert.throws(()=>io.acquireLock(repo,current,{rejectedLaunch:{active,reason:'RPC timed out',proof}}),/owned|proven/i);
+ assert.throws(()=>io.acquireLock(repo,current,{rejectedLaunch:{active:{...active,agent:'delivery-coder'},reason,proof}}),/owned|proven/i);
+ current.fence=io.acquireLock(repo,current,{rejectedLaunch:{active,reason,proof}});
+ io.releaseLock(repo,current);
 });
 test('native partial failure needs terminal proof and cannot masquerade as completion',t=>{
  const d=fixture(t),active={id:'r',dir:d,nativeSession:'s',agent:'delivery-coder',model:'test/code'};

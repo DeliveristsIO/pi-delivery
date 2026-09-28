@@ -49,21 +49,22 @@ test('skills preserve high-quality planning, security and exact route guidance',
  assert.match(orchestration,/docs\/spark\/specs\/YYYY-MM-DD-<topic>-design\.md/i);
  assert.match(orchestration,/literal small ask.*inferred larger system/i);
  assert.match(orchestration,/failable done-check/i);assert.match(orchestration,/Derive tasks and checks backward/i);
- assert.match(orchestration,/Validate executable check syntax/i);assert.match(orchestration,/browser\/live-surface verification/i);
- assert.match(orchestration,/pi-web-browse.*browser tool is available/i);
- assert.match(orchestration,/capture durable evidence such as URL, DOM snippet/i);
+ assert.match(orchestration,/Validate executable check syntax/i);assert.match(orchestration,/browser verification/i);
+ assert.match(orchestration,/delivery-verifier/);
+ assert.match(orchestration,/capture durable evidence such as redacted DOM assertions/i);
  assert.match(orchestration,/Do not require native reviewers to open browsers/i);
  assert.match(orchestration,/Headless does not mean browserless/i);
  assert.match(orchestration,/skill being installed does not grant its tools/i);
  assert.match(orchestration,/not a complete authenticated interaction test runner/i);
- assert.match(orchestration,/Neither rule resumes an already terminal blocked run/i);
+ assert.match(orchestration,/delivery_recovery_execute/);
  assert.match(orchestration,/malformed or missing structured output is an infrastructure failure/i);
  assert.match(orchestration,/failed automation become a conversation loop/i);
  assert.match(orchestration,/Pre-bind tripwires/i);
  assert.match(orchestration,/clear instructions.*concrete acceptance.*task-specific executable checks/i);
  assert.match(orchestration,/shallow approvals, fabricated evidence, behavior drift/i);
  assert.match(orchestration,/explicit user instruction to commit\/push is parent-session work/i);
- assert.match(orchestration,/Do not tell the user to perform Git writes the AI can perform/i);
+ assert.match(orchestration,/never while Delivery is ON/i);
+ assert.match(orchestration,/durable-spec requirement/);
  const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');
  assert.match(security,/Threat-model before approving/i);assert.match(security,/exploit preconditions, impact and remediation/i);
  const models=readFileSync(resolve(root,'skills/select-task-model/SKILL.md'),'utf8');
@@ -106,5 +107,24 @@ test('current docs separate issue research from approval and describe opaque nes
  for(const file of ['README.md','docs/configuration.md','skills/orchestrate-delivery/SKILL.md']) {
   const text=readFileSync(resolve(root,file),'utf8');assert.match(text,/delivery_issues/);assert.match(text,/OWNER\/REPO/);assert.match(text,/untrusted/i);assert.match(text,/not all.*issues|incomplete/i);
   assert.match(text,/opaque/i);assert.match(text,/contents.*not fingerprinted/i);assert.match(text,/run delivery in that repository/i);
+ }
+});
+
+test('browser recovery docs match runtime authority and never promise old journal repair',()=>{
+ for(const file of ['README.md','SECURITY.md','docs/configuration.md','skills/orchestrate-delivery/SKILL.md']) {
+  const text=readFileSync(resolve(root,file),'utf8');assert.match(text,/delivery-verifier/);assert.match(text,/recovery/i);assert.match(text,/one (?:evidence-only )?attempt|one-attempt/i);assert.match(text,/old journals/i);assert.match(text,/OFF/);assert.match(text,/invalidat/i);
+ }
+ const verifier=readFileSync(resolve(root,'agents/delivery-verifier.md'),'utf8');assert.match(verifier,/tools: read, grep, find, ls, bash/);assert.match(verifier,/completionGuard: false/);assert.match(verifier,/Do not install dependencies or download browsers/);
+});
+
+test('AGENTS.md stays a bounded map whose referenced sources exist',()=>{
+ const text=readFileSync(resolve(root,'AGENTS.md'),'utf8');
+ assert.ok(text.split('\n').length<=60,'AGENTS.md must stay a short table of contents, not a manual');
+ assert.match(text,/Map, not manual/i);
+ const referenced=[...text.matchAll(/`([^`\s]+)`/g)].map(m=>m[1]).filter(p=>p.includes('/'));
+ assert.ok(referenced.length>=8,'map must point at concrete sources');
+ for(const ref of referenced) {
+  const target=resolve(root,ref);
+  assert.ok(existsSync(target),`AGENTS.md points at missing source: ${ref}`);
  }
 });

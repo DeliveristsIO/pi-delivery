@@ -3,14 +3,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {registerDelivery} from '../extensions/delivery/extension.mjs';
 import {rpc} from '../extensions/delivery/rpc.mjs';
-import {readOutcome,readNativeStatus,acquireLock,releaseLock} from '../extensions/delivery/io.mjs';
-import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {readOutcome,readNativeStatus,readNativeClosure,inspectLock,acquireLock,releaseLock} from '../extensions/delivery/io.mjs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,readdirSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 const plan=()=>({mode:'implementation',title:'Bounded change',tasks:[{title:'One',instructions:'Implement one',files:['a'],acceptance:['Works'],checks:['task-one']}],checks:['final'],security:false});
 const approved={status:'approved',summary:'Inspected source and evidence',findings:[]};
-function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{},realLocksRoot,nativeStatus=()=>({state:'running'}),overrides={}}={}) {
+function harness({initialTools=['read','bash','write','subagent'],entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{},realLocksRoot,nativeStatus=()=>({state:'running'}),overrides={}}={}) {
  const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries],activeTools=[];let n=0;
  const models=['planning','coder','quality','security'].map(id=>({provider:'test',id}));
  const events={listeners:new Map(),on(k,f){this.listeners.set(k,f);return()=>this.listeners.delete(k);},emit(k,r){if(!k.endsWith(':request'))return;calls.push(r);let data={version:1,capabilities:{asyncSpawn:true,processTerminalProof:{version:1}},methods:['spawn','status','stop']};
@@ -18,7 +18,7 @@ function harness({entries=[],reports=[],live=false,spawnError=false,checkCode=0,
  if(r.method==='status')data={fleet:{totalActive:0}};
  const reply=()=>this.listeners.get(`subagents:rpc:v1:reply:${r.requestId}`)({version:1,requestId:r.requestId,success:!(spawnError&&r.method==='spawn'),data,error:{message:'Provider unavailable'}});if(r.method==='ping'&&delayPing)setTimeout(reply,delayPing);else reply();
  }};
- const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>['read','bash','write','subagent'],setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async()=>true};
+ const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>activeTools.length?[...activeTools]:initialTools,setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async()=>true};
  const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
  const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  if(realLocksRoot){ctx.cwd=realLocksRoot;deps.repoRoot=()=>realLocksRoot;deps.acquireLock=acquireLock;deps.releaseLock=releaseLock;}
@@ -49,28 +49,127 @@ test('completed review continuation prepares the next plan without resume or per
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,launches);
 });
 
+for(const reply of ['approval','yes','okay','proceed'])test(`conversational ${reply} authorizes only an already displayed plan`,async()=>{
+ const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
+ await h.input(reply);await h.invoke('delivery_plan',plan());await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+ await h.input(reply);await h.invoke('delivery_execute');assert.equal((await h.wait()).stage,'complete');
+});
 test('thin interface proposes without launching and questions never approve',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
- assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_issues','delivery_plan','delivery_status','delivery_resume','delivery_stop'].sort());
+ assert.deepEqual(Object.keys(h.tools).sort(),['delivery_configure','delivery_execute','delivery_issues','delivery_plan','delivery_status','delivery_resume','delivery_stop','delivery_recovery_plan','delivery_recovery_execute'].sort());
  await h.invoke('delivery_plan',plan());await h.input('Can you implement this plan?');await assert.rejects(h.invoke('delivery_execute'),/approval/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
  await h.input('Plan only, do not implement');await assert.rejects(h.invoke('delivery_execute'),/approval/i);
 });
 test('native RPC runs coder, task checks, independent quality/security and final checks in order',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);const p=plan();p.tasks[0].sensitive=true;p.tasks.push({...p.tasks[0],title:'Two',files:['b'],checks:['task-two'],sensitive:false});await h.invoke('delivery_plan',p);await h.input('Implement the displayed plan');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'complete',s.reason);
  const launches=h.calls.filter(c=>c.method==='spawn').map(c=>c.params);assert.deepEqual(launches.map(c=>c.model),['test/coder','test/quality','test/security','test/coder','test/quality']);assert.ok(launches.every(c=>c.context==='fresh'&&c.async===true&&c.share===false));
- assert.deepEqual(s.checks.map(c=>c.command),['task-one','task-two','final']);assert.equal(s.reports.length,5);assert.match(launches[1].task,/task-one/);assert.match(launches[1].task,/Do not modify files/);assert.match(launches[3].task,/Two/);
+ assert.deepEqual(s.checks.map(c=>c.command),['task-one','task-two','final']);assert.equal(s.reports.length,5);assert.match(launches[1].task,/task-one/);assert.match(launches[1].task,/Do not modify files/);assert.match(launches[1].task,/Call the structured_output tool/);assert.match(launches[3].task,/Two/);
+});
+test('security findings return to coder then rerun task checks and both independent reviews',async()=>{
+ const finding={status:'changes_requested',summary:'Authorization defect',findings:['high: a:1 deny unauthorized access']};
+ const h=harness({reports:[approved,approved,finding,approved,approved,approved]});const p=plan();p.security=true;
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',p);await h.input('approval');await h.invoke('delivery_execute');
+ assert.equal((await h.wait()).stage,'complete');
+ const launches=h.calls.filter(c=>c.method==='spawn');
+ assert.deepEqual(launches.map(c=>c.params.agent),['delivery-coder','delivery-reviewer','delivery-security','delivery-coder','delivery-reviewer','delivery-security']);
+ assert.match(launches[3].params.task,/Authorization defect/);
+ assert.deepEqual(h.state().checks.map(c=>c.command),['task-one','task-one','final']);
 });
 test('corrections are bounded and keep original approval',async()=>{
  const finding={status:'changes_requested',summary:'Bug',findings:['high: a:1 fix bug']};const h=harness({reports:[approved,finding,approved,finding,approved,finding]});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.match(s.reason,/correction.*limit/i);assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,3);assert.ok(!s.checks.some(c=>c.command==='final'));
 });
+test('continue after exhausted correction rounds displays a scoped fresh proposal without launching',async()=>{
+ const finding={status:'changes_requested',summary:'SQLite race remains',findings:['high: app/models/invitation.rb:40 handle SQLite busy deterministically']};
+ const h=harness({reports:[approved,finding,approved,finding,approved,finding]});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);const p=plan();p.tasks.push({...p.tasks[0],title:'Later'});
+ await h.invoke('delivery_plan',p);await h.input('Approved');await h.invoke('delivery_execute');const blocked=await h.wait();
+ assert.equal(blocked.stage,'blocked');const before=h.calls.filter(c=>c.method==='spawn').length;
+ await h.input('continue');assert.equal(h.state().stage,'awaiting-approval');assert.equal(h.state().plan.tasks.length,2);
+ assert.match(h.state().plan.tasks[0].instructions,/SQLite race remains/);
+ assert.match(h.state().plan.tasks[0].instructions,/Do not replay accepted/);
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,before);
+ const proposal=h.state().run;await h.input('continue');assert.equal(h.state().run,proposal,'repeat continue never replans or approves');
+ await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+});
 test('review-only does not execute checks or a writer and findings cannot launch fixes',async()=>{
  const h=harness({reports:[{status:'changes_requested',summary:'Bug',findings:['a:1 bug']}]});await h.start();await h.commands.delivery.handler('on',h.ctx);const p=plan();p.mode='review';p.tasks[0].checks=[];p.checks=[];await h.invoke('delivery_plan',p);await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.equal(s.checks.length,0);assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-reviewer']);
+});
+test('status distinguishes live same-process host check from closure lost after reload',async()=>{
+ let finish,first=true;
+ const h=harness({overrides:{verifyCommand:(_root,command)=>first?(first=false,new Promise(resolve=>{finish=resolve;})):Promise.resolve({command,code:0,signal:null,terminated:false,processClosed:true,output:'ok'})}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ for(let i=0;i<100&&!h.state().pendingCheck;i++)await new Promise(resolve=>setTimeout(resolve,1));
+ assert.ok(h.state().pendingCheck);assert.match(h.messages.at(-1)?.content || '',/plan/i);
+ assert.match((await h.invoke('delivery_status')).content[0].text,/Host check running/i);
+ const r=harness({entries:h.saved});await r.start();assert.match((await r.invoke('delivery_status')).content[0].text,/Host check closure is unknown/i);
+ finish({command:'task-one',code:0,signal:null,terminated:false,processClosed:true,output:'ok'});
+ assert.equal((await h.wait()).stage,'complete');
 });
 test('failed checks stop at the bound without fabricated passing evidence',async()=>{
  const h=harness({checkCode:1});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.ok(s.checks.every(c=>c.code===1));assert.ok(!h.calls.some(c=>c.params?.agent==='delivery-reviewer'));
 });
-test('launch errors retain unknown ownership and prevent duplicates',async()=>{
- const h=harness({spawnError:true});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.ok(s.active);await assert.rejects(h.invoke('delivery_execute'));await assert.rejects(h.invoke('delivery_plan',plan()));assert.equal(h.calls.filter(c=>c.method==='spawn').length,1);
+test('launch errors retain correlated unknown ownership and prevent duplicates',async()=>{
+ const h=harness({spawnError:true});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.ok(s.active);
+ const launch=h.calls.find(c=>c.method==='spawn');assert.equal(s.active.launchRequestId,launch.requestId);
+ assert.match(s.reason,/request.*identity/i);assert.match(s.reason,/Provider unavailable/);
+ await assert.rejects(h.invoke('delivery_execute'));await assert.rejects(h.invoke('delivery_plan',plan()));
+ await assert.rejects(h.commands.delivery.handler('off',h.ctx),/native launch correlation.*no replacement/i);
+ const before=h.state().stopping;
+ await assert.rejects(h.commands.delivery.handler('stop',h.ctx),/native launch correlation.*no replacement/i);
+ assert.equal(h.state().stopping,before,'refused stop must not create a false cancellation request');
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,1);
+});
+test('verified prelaunch native refusal permits fresh plan, preserves old receipts and requires new approval',async()=>{
+ const locks=[],original='Run fan-out: 1/64 used, 63 remaining\\nOriginal prelaunch refusal';
+ const h=harness({spawnError:true,onLock:(...args)=>locks.push(args),overrides:{inspectLock:()=>({fence:'retained'}),proveNativePrelaunch:(_active,reason)=>{assert.equal(reason,original);return {kind:'native-prelaunch-refusal',source:'verified'};}}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');await h.wait();
+ const state=h.state();state.active.stage='security';state.active.agent='delivery-security';state.stopping=true;
+ state.reason=original;h.saved.push({type:'custom',customType:'delivery-coordinator-v2',data:structuredClone(state)});
+ state.reason='Stop not confirmed: unknown worker';
+ await h.start();await h.invoke('delivery_plan',plan());
+ assert.equal(h.state().stage,'awaiting-approval');assert.equal(h.state().active,null);
+ assert.ok(h.saved.some(e=>e.customType==='delivery-superseded-v1'));
+ assert.ok(locks.some(([action])=>action==='release'));
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,1);
+ await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+});
+test('closed native failed reviewer missing structured tool output gets fresh reviewed recovery without coder replay',async()=>{
+ let reviews=0;
+ const nativeFailure=active=>{
+  const error=new Error(`Native worker ${active.id} failed: Missing structured_output call; this step has outputSchema and must finish by calling structured_output.`);
+  error.closed=true;error.nativeState='failed';throw error;
+ };
+ const closure=active=>{
+  const message='Missing structured_output call; this step has outputSchema and must finish by calling structured_output.';
+  const outputPath=join(active.dir,'structured-output/output.json');
+  return {status:{runId:active.id,sessionId:active.nativeSession,state:'failed',error:message,steps:[{agent:active.agent,model:active.model,attemptedModels:[active.model],status:'failed',error:message,structuredOutputPath:outputPath,effects:{settlementDiagnostic:{mutation:{expected:false,attempted:false,observed:false},requiredOutput:{kind:'structured',path:outputPath,missing:true}}}}]},terminal:terminalProof(active.id)};
+ };
+ const h=harness({readOutcome:active=>active.stage==='quality' && reviews++<2?{status:'changes_requested',summary:'Concrete fix required',findings:['high: a:1 fix']}:active.stage==='quality' && reviews===3?nativeFailure(active):approved,overrides:{readNativeClosure:closure}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ assert.equal((await h.wait()).stage,'blocked');assert.equal(h.state().round,2);assert.equal(h.state().failure.reason,'review_report_invalid');assert.equal(h.state().leased,true);
+ // Simulate the historical journal saved before failed-step classification existed.
+ const historical=structuredClone(h.state());const failedNative=historical.failure.native;
+ historical.failure={stage:'quality',reason:'infrastructure_or_product_failure'};historical.leased=false;historical.lockFence=null;
+ historical.reason=`Native worker ${failedNative.id} failed: Missing structured_output call; this step has outputSchema and must finish by calling structured_output.`;
+ const entries=[...h.saved,{type:'custom',customType:'delivery-coordinator-v2',data:historical}];
+ let releases=0;
+ const r=harness({entries,overrides:{readNativeClosure:closure,assertNoLock:()=>{},inspectLock:()=>{},acquireLock:()=>`fence-${++releases}`,releaseLock:()=>{}},readOutcome:()=>approved});
+ await r.start();await r.input('continue');assert.equal(r.state().stage,'awaiting-recovery-approval');
+ assert.equal(r.calls.filter(c=>c.method==='spawn').length,0);
+ await assert.rejects(r.invoke('delivery_recovery_execute'),/approval/i);
+ await r.input('Approved');await r.invoke('delivery_recovery_execute');assert.equal((await r.wait()).stage,'complete');
+ assert.equal(r.calls.filter(c=>c.method==='spawn' && c.params.agent==='delivery-coder').length,0);
+ assert.equal(r.calls.filter(c=>c.method==='spawn' && c.params.agent==='delivery-reviewer').length,1);
+});
+test('failed reviewer without verified native closure retains exact worker and lease',async()=>{
+ const h=harness({readOutcome:active=>{
+  if(active.stage!=='quality')return approved;
+  const error=new Error(`Native worker ${active.id} failed: Missing structured_output call; this step has outputSchema and must finish by calling structured_output.`);
+  error.closed=true;error.nativeState='failed';throw error;
+ },overrides:{readNativeClosure:()=>null}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ const s=await h.wait();assert.equal(s.stage,'blocked');assert.equal(s.leased,true);assert.ok(s.active?.id);assert.equal(s.failure.reason,'infrastructure_or_product_failure');
+ await assert.rejects(h.invoke('delivery_recovery_plan'));assert.equal(h.calls.filter(c=>c.method==='spawn').length,2);
 });
 test('malformed worker report blocks rather than implying approval',async()=>{
  const h=harness({reports:[{status:'approved',summary:'ok',findings:['unresolved']}]});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');assert.match((await h.wait()).reason,/report/i);
@@ -448,4 +547,206 @@ test('opaque coverage warning is bounded and counts omitted boundary paths',asyn
 
 test('reviewer children do not register the issues tool or any coordinator authority',()=>{
  const h=harness({overrides:{child:true}});assert.deepEqual(Object.keys(h.tools),[]);assert.deepEqual(Object.keys(h.commands),[]);
+});
+
+const browserContract=()=>({acceptance:['Works'],runner:'scripts/browser.mjs',probe:'node scripts/browser.mjs --probe',scenarios:[{name:'navigation',command:'node scripts/browser.mjs --navigation'}],environment:'local',target:'http://127.0.0.1:3000',interactionScope:'Isolated fixture navigation only',artifacts:[]});
+function browserHarness(t,{failEvidence=false,failProbe=false,malformedReview=false,recoveryDefect=false,...options}={}) {
+ const dir=mkdtempSync(join(tmpdir(),'delivery-browser-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+ let fence=Number(options.entries?.at(-1)?.data.lockFence?.match(/^fence-(\d+)$/)?.[1] || 0),h,failed=false;const order=[];
+ h=harness({...options,readOutcome:active=>{
+  order.push(active.stage);
+  if(active.stage==='probe'||active.stage==='verifier') {
+   const s=h.state(),identity=s.active.evidence.identity;
+   const fail=active.stage==='probe'?failProbe:failEvidence&&(failEvidence==='always'||!failed);
+   if(fail)failed=true;
+   return {...identity,status:fail?'blocked':'approved',summary:fail?'Headless fixture unavailable':'Navigation assertions passed',findings:[],...(fail?{blockedReason:'evidence_unavailable'}:{}),commands:fail?[]:[{command:active.stage==='probe'?browserContract().probe:browserContract().scenarios[0].command,exitCode:0}],artifacts:[]};
+  }
+  if(active.stage==='quality'&&recoveryDefect&&h.state().recoveringTask===h.state().task)return {status:'changes_requested',summary:'Navigation bug',findings:['high: a:12 navigation loses state']};
+  if(active.stage==='quality'&&malformedReview&&!failed){failed=true;return {status:'approved'};}
+  return approved;
+ },overrides:{evidenceRoot:()=>join(dir,'evidence'),readNativeClosure:active=>({status:{runId:active.id,sessionId:active.nativeSession,state:'complete',steps:[{agent:active.agent,model:active.model,attemptedModels:[active.model]}]},terminal:terminalProof(active.id)}),inspectLock:(_r,o)=>{assert.equal(o.fence,`fence-${fence}`);},acquireLock:(_r,o)=>{if(o.fence)assert.equal(o.fence,`fence-${fence}`);return `fence-${++fence}`;},verifyCommand:async(_r,command)=>{order.push(command);return {command,code:0,signal:null,terminated:false,processClosed:true,output:'actual output'};},...options.overrides}});
+ return Object.assign(h,{order});
+}
+const fourTaskPlan=()=>{const p=plan();p.tasks[0].browser=browserContract();p.tasks[0].sensitive=true;for(let i=2;i<=4;i++)p.tasks.push({...plan().tasks[0],title:`Task ${i}`,checks:[`task-${i}`]});return p;};
+test('four-task browser pipeline probes before coding and hands native evidence to read-only reviewers',async t=>{
+ const h=browserHarness(t);const s=await executePlan(h,fourTaskPlan());assert.equal(s.stage,'complete',s.reason);
+ assert.deepEqual(h.order,['probe','coder','task-one','verifier','quality','security','coder','task-2','quality','coder','task-3','quality','coder','task-4','quality','final']);
+ const launches=h.calls.filter(c=>c.method==='spawn');assert.ok(launches.filter(c=>c.params.agent==='delivery-verifier').every(c=>c.params.model==='test/coder'&&c.params.context==='fresh'));
+ assert.match(launches.find(c=>c.params.agent==='delivery-reviewer').params.task,/Navigation assertions passed/);
+});
+test('missing browser capability blocks before first coder without install or fallback',async t=>{
+ const h=browserHarness(t,{failProbe:true});const s=await executePlan(h,fourTaskPlan());assert.equal(s.stage,'blocked');assert.equal(s.failure.reason,'capability_unavailable');assert.deepEqual(h.order,['probe']);
+ assert.match(textOf(await h.invoke('delivery_status')),/capability|prerequisite/i);await assert.rejects(h.invoke('delivery_recovery_plan'),/checkpoint|capability|recover/i);
+});
+test('closed evidence recovery needs new approval and preserves accepted task-one coder/checks through four tasks',async t=>{
+ const h=browserHarness(t,{failEvidence:true});let s=await executePlan(h,fourTaskPlan());assert.equal(s.stage,'blocked');assert.equal(s.active,null);assert.equal(s.failure.reason,'evidence_unavailable');
+ assert.match(textOf(await h.invoke('delivery_status')),/delivery_recovery_plan/);await assert.rejects(h.invoke('delivery_resume'),/recovery_plan/);
+ const count=h.calls.length;await h.invoke('delivery_recovery_plan');assert.equal(h.calls.length,count,'proposal is inspection only');await assert.rejects(h.invoke('delivery_recovery_execute'),/approval/i);
+ await h.input('Approved');await h.invoke('delivery_recovery_execute');s=await h.wait();assert.equal(s.stage,'complete',s.reason);
+ assert.equal(h.order.filter(x=>x==='coder').length,4);assert.equal(h.order.filter(x=>x==='task-one').length,1);assert.equal(s.recoveryAttempts[0].count,1);
+});
+test('malformed closed reviewer report permits one approved fresh review, never coder replay',async t=>{
+ const h=browserHarness(t,{malformedReview:true});assert.equal((await executePlan(h,plan())).stage,'blocked');assert.equal(h.state().failure.reason,'review_report_invalid');
+ await h.invoke('delivery_recovery_plan');await h.input('Approved');await h.invoke('delivery_recovery_execute');assert.equal((await h.wait()).stage,'complete');assert.equal(h.order.filter(x=>x==='coder').length,1);assert.equal(h.order.filter(x=>x==='quality').length,2);
+});
+for(const mutation of ['snapshot','routes','closure','pending','unknown','stop','budget','fence','foreign'])test(`evidence recovery refuses ${mutation} without new launch`,async t=>{
+ const h=browserHarness(t,{failEvidence:true});await executePlan(h,fourTaskPlan());const retained=structuredClone(h.state());
+ if(mutation==='pending')retained.pendingCheck='uncertain';if(mutation==='unknown')retained.active={id:null};if(mutation==='stop')retained.stopping=true;if(mutation==='budget')retained.round=2;if(mutation==='fence')retained.lockFence='stale';if(mutation==='foreign')retained.failure.native.nativeSession='foreign';
+ const r=browserHarness(t,{entries:[{type:'custom',customType:'delivery-coordinator-v2',data:retained}],snapshot:mutation==='snapshot'?{a:'changed'}:undefined,overrides:{inspectLock:(_r,o)=>{if(o.fence==='stale')throw new Error('Stale fence');},...(mutation==='closure'?{readNativeClosure:()=>null}:{}),...(mutation==='routes'?{loadConfig:()=>({routes:{planning:'test/planning',coder:'test/quality',quality:'test/quality',security:'test/security'}})}:{})}});
+ await r.start();await assert.rejects(r.invoke('delivery_recovery_plan'));assert.equal(r.calls.filter(c=>c.method==='spawn').length,0);
+});
+test('OFF explicitly invalidates closed recovery and restores shell; ON never revives it',async t=>{
+ const h=browserHarness(t,{failEvidence:true});await executePlan(h,fourTaskPlan());await h.commands.delivery.handler('off',h.ctx);assert.ok(h.activeTools.includes('bash'));assert.equal(h.handlers.tool_call({toolName:'bash'}),undefined);
+ assert.match(textOf(await h.invoke('delivery_status')),/unmanaged handoff.*invalidated recovery/i);await assert.rejects(h.invoke('delivery_resume'),/invalidated recovery/i);
+ await h.commands.delivery.handler('on',h.ctx);await assert.rejects(h.invoke('delivery_recovery_plan'),/invalidated recovery/i);assert.equal(h.order.filter(x=>x==='coder').length,1);
+});
+test('recovery defect stops current task without coding, later tasks or final checks',async t=>{
+ const h=browserHarness(t,{failEvidence:true,recoveryDefect:true});await executePlan(h,fourTaskPlan());await h.invoke('delivery_recovery_plan');await h.input('Approved');await h.invoke('delivery_recovery_execute');const s=await h.wait();
+ assert.equal(s.stage,'blocked');assert.equal(s.failure.reason,'recovery_code_defect');assert.equal(h.order.filter(x=>x==='coder').length,1);assert.ok(!h.order.includes('task-2'));assert.ok(!h.order.includes('final'));assert.equal(s.recoveryAttempts[0].count,1);
+ assert.match(textOf(await h.invoke('delivery_status')),/a:12/);assert.match(textOf(await h.invoke('delivery_status')),/correction.*delivery_plan/);await assert.rejects(h.invoke('delivery_recovery_plan'),/recoverable/);
+});
+test('one evidence recovery attempt survives reload and repeated proposal cannot reset it',async t=>{
+ const h=browserHarness(t,{failEvidence:'always'});await executePlan(h,fourTaskPlan());await h.invoke('delivery_recovery_plan');await h.input('Approved');await h.invoke('delivery_recovery_plan');await assert.rejects(h.invoke('delivery_recovery_execute'),/approval/);
+ await h.input('Approved');await h.invoke('delivery_recovery_execute');assert.equal((await h.wait()).stage,'blocked');await assert.rejects(h.invoke('delivery_recovery_plan'),/limit/);
+ const r=browserHarness(t,{entries:h.saved,overrides:{inspectLock:()=>{}}});await r.start();await assert.rejects(r.invoke('delivery_recovery_plan'),/limit/);assert.equal(r.calls.length,0);
+});
+test('recovery rechecks snapshot after proposal and concurrent execution has one launch chain',async t=>{
+ const snapshot={a:'hash',unrelated:'dirty'},h=browserHarness(t,{failEvidence:true,snapshot,delayPing:15});await executePlan(h,fourTaskPlan());await h.invoke('delivery_recovery_plan');snapshot.a='changed';await h.input('Approved');await assert.rejects(h.invoke('delivery_recovery_execute'),/snapshot/);assert.equal(h.order.filter(x=>x==='verifier').length,1);
+ snapshot.a='hash';await h.invoke('delivery_recovery_plan');await h.input('Approved');const start=h.invoke('delivery_recovery_execute');await assert.rejects(h.invoke('delivery_recovery_execute'),/progress/);await start;assert.equal((await h.wait()).stage,'complete');assert.equal(h.order.filter(x=>x==='verifier').length,2);
+});
+test('OFF after reload restores original available tools, never the restricted coordinator list',async t=>{
+ const h=browserHarness(t,{failEvidence:true});await executePlan(h,fourTaskPlan());const r=browserHarness(t,{entries:h.saved,initialTools:[...h.activeTools]});await r.start();await r.commands.delivery.handler('off',r.ctx);assert.ok(r.activeTools.includes('bash'));
+ await r.commands.delivery.handler('on',r.ctx);await r.commands.delivery.handler('off',r.ctx);assert.ok(r.activeTools.includes('bash'));assert.match(textOf(await r.invoke('delivery_status')),/invalidated recovery/);
+});
+test('OFF release failure keeps coordination ON and recovery fence intact',async t=>{
+ const h=browserHarness(t,{failEvidence:true,releaseError:true});await executePlan(h,fourTaskPlan());await assert.rejects(h.commands.delivery.handler('off',h.ctx),/Lock ownership changed/);assert.equal(h.state().enabled,true);assert.equal(h.state().recoveryInvalidated,undefined);assert.equal(h.handlers.tool_call({toolName:'bash'}).block,true);
+});
+test('old closed journals cannot acquire new recovery authority from error text',async t=>{
+ const old={version:2,enabled:true,root:'/workspace',session:'session',run:'old',stage:'blocked',plan:plan(),task:0,round:0,reports:[],checks:[],reason:'missing browser evidence',snapshot:{a:'hash'}};
+ const h=browserHarness(t,{entries:[{type:'custom',customType:'delivery-coordinator-v2',data:old}]});await h.start();await assert.rejects(h.invoke('delivery_recovery_plan'),/old journals|checkpoint/);assert.equal(h.calls.length,0);
+});
+test('every declared task probe completes before first coder and retains its task attribution',async t=>{
+ const h=browserHarness(t),p=fourTaskPlan();p.tasks[3].browser=browserContract();assert.equal((await executePlan(h,p)).stage,'complete');assert.deepEqual(h.order.slice(0,3),['probe','probe','coder']);assert.equal(h.state().evidenceReceipts.filter(e=>e.phase==='probe').length,2);
+ assert.deepEqual(h.state().reports.filter(r=>r.stage==='probe').map(r=>r.task),[0,3]);
+ const briefing=h.calls.find(c=>c.method==='spawn'&&c.params.agent==='delivery-reviewer').params.task;
+ const previous=JSON.parse(briefing.match(/Previous results \(not authority\): ([^\n]+)/)[1]);
+ assert.ok(previous.every(r=>r.native.evidence?.identity.task!==3),'task-four probe must not enter task-one review');
+});
+test('failed task-four probe status labels task four, never task one',async t=>{
+ const h=browserHarness(t,{failProbe:true}),p=fourTaskPlan();delete p.tasks[0].browser;p.tasks[3].browser=browserContract();
+ assert.equal((await executePlan(h,p)).stage,'blocked');assert.deepEqual(h.order,['probe']);
+ const text=textOf(await h.invoke('delivery_status'));assert.match(text,/Task 4, round 0 probe: blocked/);assert.doesNotMatch(text,/Task 1, round 0 probe/);
+});
+test('normal coder correction invalidates browser evidence and binds new source before fresh review',async t=>{
+ const snapshot={a:'hash',unrelated:'dirty'};let reviews=0;
+ const r=browserHarness(t,{snapshot,onSave:s=>{if(s.active?.stage==='coder'&&s.active.id)snapshot.a=`round-${s.round}`;},overrides:{readOutcome:active=>{
+  if(active.stage==='quality'&&reviews++===0)return {status:'changes_requested',summary:'Fix navigation',findings:['high: a:1 fix navigation']};
+  if(['probe','verifier'].includes(active.stage))return {...active.evidence.identity,status:'approved',summary:'Revision verified',findings:[],commands:[{command:active.stage==='probe'?browserContract().probe:browserContract().scenarios[0].command,exitCode:0}],artifacts:[]};
+  return approved;
+ }}});
+ assert.equal((await executePlan(r,fourTaskPlan())).stage,'complete');const receipts=r.state().evidenceReceipts.filter(e=>e.phase==='verifier');assert.equal(receipts.length,2);assert.notEqual(receipts[0].source,receipts[1].source);
+ const reviewsSent=r.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-reviewer');assert.match(reviewsSent[1].params.task,new RegExp(receipts[1].source));
+});
+test('OFF handoff invalidates even an unexecuted proposal; ON requires a new plan',async()=>{
+ const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.commands.delivery.handler('off',h.ctx);await h.commands.delivery.handler('on',h.ctx);await h.input('Approved');await assert.rejects(h.invoke('delivery_execute'),/new.*plan|handoff/i);assert.equal(h.calls.length,0);
+});
+test('sanitized text artifact is delivered inline to both read-only reviewers',async t=>{
+ const {createHash}=await import('node:crypto');const p=fourTaskPlan();p.tasks[0].browser.artifacts=[{path:'navigation.txt',kind:'text',capture:'Redacted navigation assertion'}];
+ const h=browserHarness(t,{overrides:{readOutcome:active=>{
+  if(!active.evidence)return approved;
+  const {identity,directory,browser}=active.evidence,artifacts=[];
+  if(identity.phase==='verifier') {
+   const text='Navigation keeps selected item\nCookie: synthetic-cookie';writeFileSync(join(directory,'navigation.txt'),text);artifacts.push({path:'navigation.txt',sha256:createHash('sha256').update(text).digest('hex')});
+  }
+  return {...identity,status:'approved',summary:'Fixture inspected',findings:[],commands:[{command:identity.phase==='probe'?browser.probe:browser.scenarios[0].command,exitCode:0}],artifacts};
+ }}});
+ assert.equal((await executePlan(h,p)).stage,'complete');const reviews=h.calls.filter(c=>c.method==='spawn'&&['delivery-reviewer','delivery-security'].includes(c.params.agent));
+ for(const c of reviews.slice(0,2)){assert.match(c.params.task,/Navigation keeps selected item/);assert.doesNotMatch(c.params.task,/synthetic-cookie/);assert.match(c.params.task,/Do not modify files\. Do not execute commands/);}
+});
+test('typed native missing report needs closure and fresh recovery approval, never counts as verdict',async t=>{
+ let failed=false;const h=browserHarness(t,{overrides:{readOutcome:active=>{if(active.stage==='quality'&&!failed){failed=true;throw Object.assign(new Error('Native worker missing structured report'),{code:'DELIVERY_STRUCTURED_REPORT',closed:true,nativeState:'complete'});}return approved;}}});
+ assert.equal((await executePlan(h,plan())).stage,'blocked');assert.equal(h.state().failure.reason,'review_report_invalid');assert.equal(h.state().reports.filter(r=>r.stage==='quality').length,0);
+ await h.invoke('delivery_recovery_plan');await h.input('Approved');await h.invoke('delivery_recovery_execute');assert.equal((await h.wait()).stage,'complete');assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,1);
+});
+test('new unknown native fleet during recovery preflight consumes attempt but launches nothing',async t=>{
+ let recovery=false;const h=browserHarness(t,{failEvidence:true,overrides:{rpc:async(...args)=>{if(recovery&&args[1]==='status')return {fleet:{totalActive:1}};return rpc(...args);}}});
+ await executePlan(h,fourTaskPlan());await h.invoke('delivery_recovery_plan');await h.input('Approved');recovery=true;const count=h.calls.filter(c=>c.method==='spawn').length;await assert.rejects(h.invoke('delivery_recovery_execute'),/ownership unknown/);assert.equal(h.calls.filter(c=>c.method==='spawn').length,count);assert.equal(h.state().recoveryAttempts[0].count,1);
+});
+test('fresh continuation replaces old v2 block without recovery metadata, never inherits approval',async()=>{
+ const old={version:2,enabled:true,stage:'blocked',root:'/workspace',session:'session',run:'old-run',task:0,round:0,active:null,plan:plan(),reports:[],checks:[],snapshot:{a:'old'},reason:'Browser evidence unavailable',leased:false};
+ const h=harness({entries:[{type:'custom',customType:'delivery-coordinator-v2',data:old}]});await h.start();
+ await assert.rejects(h.invoke('delivery_recovery_plan'),/proof absent/i);
+ const revised=plan();revised.title='Remaining work; browser validation deferred';revised.tasks[0].acceptance=['Server behavior only; browser login remains unverified'];
+ await h.invoke('delivery_plan',revised);
+ assert.equal(h.state().stage,'awaiting-approval');assert.equal(h.state().superseded.run,'old-run');assert.notEqual(h.state().run,'old-run');
+ assert.deepEqual(h.saved.find(e=>e.customType==='delivery-superseded-v1').data,{...old,toolsBefore:['read','bash','write','subagent']});
+ assert.match(h.messages.map(m=>m.content).join('\n'),/omissions are not passing evidence/);
+ await assert.rejects(h.invoke('delivery_execute'),/approval/i);assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+ await h.input('Approved');await h.invoke('delivery_execute');assert.equal((await h.wait()).stage,'complete');
+});
+test('fresh continuation releases settled evidence lease without OFF and preserves old reports',async t=>{
+ const h=browserHarness(t,{failEvidence:true});await executePlan(h,fourTaskPlan());const old=structuredClone(h.state());
+ await h.invoke('delivery_plan',plan());assert.equal(h.state().superseded.run,old.run);assert.equal(h.state().stage,'awaiting-approval');
+ assert.deepEqual(h.saved.find(e=>e.customType==='delivery-superseded-v1').data,old);assert.equal(h.order.filter(s=>s==='coder').length,1);
+});
+test('fresh continuation refuses unknown fleet without replacing retained state',async t=>{
+ let reject=false;const h=browserHarness(t,{failEvidence:true,overrides:{rpc:async(...args)=>reject&&args[1]==='status'?{fleet:{totalActive:1}}:rpc(...args)}});
+ await executePlan(h,fourTaskPlan());const old=structuredClone(h.state());reject=true;
+ await assert.rejects(h.invoke('delivery_plan',plan()),/ownership is unknown/);assert.deepEqual(h.state(),old);
+});
+test('typed evidence block in read-only review releases lease and cannot enable recovery',async t=>{
+ const h=browserHarness(t,{overrides:{readOutcome:()=>({status:'blocked',summary:'Supplied evidence unavailable',findings:[],blockedReason:'evidence_unavailable'})}}),p=plan();p.mode='review';p.tasks[0].checks=[];p.checks=[];
+ const s=await executePlan(h,p);assert.equal(s.stage,'blocked');assert.equal(s.leased,false);await assert.rejects(h.invoke('delivery_recovery_plan'));await h.invoke('delivery_plan',plan());assert.equal(h.state().stage,'awaiting-approval');assert.equal(h.calls.filter(c=>c.method==='spawn').length,1);
+});
+
+for(const scenario of ['closed','recovery ping failure','recovery fleet failure','exhausted recovery','live owner','unknown owner','stale fence','foreign run','foreign session','foreign native owner','foreign worker','foreign repository','missing native','missing proof','malformed proof','changed proof','release failure'])test(`OFF after full restart with real retained lock: ${scenario}`,async t=>{
+ const {spawnSync,spawn}=await import('node:child_process');
+ const source=browserHarness(t,{failEvidence:'always'});await executePlan(source,fourTaskPlan());
+ if(scenario==='exhausted recovery'){
+  await source.invoke('delivery_recovery_plan');await source.input('Approved');await source.invoke('delivery_recovery_execute');await source.wait();
+  assert.equal(source.state().recoveryAttempts[0].count,1);
+ }
+ const retained=structuredClone(source.state()),root=mkdtempSync(join(tmpdir(),'delivery-off-restart-'));
+ const old=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(root,'agent');
+ t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;rmSync(root,{recursive:true,force:true});});
+ retained.root=root;const native=retained.failure.native;native.dir=join(root,'native');mkdirSync(native.dir);
+ const status={runId:native.id,sessionId:native.nativeSession,state:'complete',steps:[{agent:native.agent,model:native.model,attemptedModels:[native.model]}]};
+ writeFileSync(join(native.dir,'status.json'),JSON.stringify(status));writeFileSync(join(native.dir,'process-terminal.json'),JSON.stringify(retained.failure.closure));
+ const dead=Number(spawnSync(process.execPath,['-e','console.log(process.pid)'],{encoding:'utf8'}).stdout.trim());assert.ok(dead>0);
+ let pid=dead;if(scenario==='live owner'){const child=spawn(process.execPath,['-e','setTimeout(()=>{},30000)']);pid=child.pid;t.after(()=>child.kill());}
+ retained.lockFence=acquireLock(root,{session:retained.session,run:retained.run,pid});
+ const lockDir=join(process.env.PI_CODING_AGENT_DIR,'delivery-locks'),lock=join(lockDir,readdirSync(lockDir).find(n=>n.endsWith('.json')));
+ if(scenario==='unknown owner')writeFileSync(lock,JSON.stringify({...JSON.parse(readFileSync(lock)),pid:null}));
+ if(scenario==='stale fence')retained.lockFence='stale';
+ if(scenario==='foreign run')retained.run='foreign';
+ if(scenario==='foreign session')native.session='foreign';
+ if(scenario==='foreign native owner')native.nativeSession='foreign';
+ if(scenario==='foreign worker')native.id='foreign';
+ if(scenario==='foreign repository')retained.root='/foreign';
+ if(scenario==='missing native')delete retained.failure.native;
+ if(scenario==='missing proof')rmSync(join(native.dir,'process-terminal.json'));
+ if(scenario==='malformed proof')writeFileSync(join(native.dir,'process-terminal.json'),JSON.stringify({state:'observed'}));
+ if(scenario==='changed proof')writeFileSync(join(native.dir,'process-terminal.json'),JSON.stringify({...retained.failure.closure,observedAt:999}));
+ const before=readFileSync(lock);let failRelease=scenario==='release failure';
+ const h=harness({entries:[{type:'custom',customType:'delivery-coordinator-v2',data:retained}],realLocksRoot:root,overrides:{inspectLock,readNativeClosure,rpc:async(...args)=>{if(scenario==='recovery ping failure'&&args[1]==='ping')throw new Error('Injected ping failure');if(scenario==='recovery fleet failure'&&args[1]==='status')return {fleet:{totalActive:1}};return rpc(...args);},releaseLock:(...args)=>{if(failRelease)throw new Error('Injected release failure');return releaseLock(...args);}}});await h.start();
+ if(scenario.startsWith('recovery ')){
+  await h.invoke('delivery_recovery_plan');await h.input('Approved');
+  await assert.rejects(h.invoke('delivery_recovery_execute'),/Injected ping failure|ownership unknown/);
+  assert.equal(h.state().recoveryAttempts[0].count,1);
+  assert.equal(h.state().failure.reason,'infrastructure_or_product_failure');
+  retained.recoveryAttempts=structuredClone(h.state().recoveryAttempts);
+ }
+ if(!['closed','recovery ping failure','recovery fleet failure','exhausted recovery','release failure'].includes(scenario)){
+  await assert.rejects(h.commands.delivery.handler('off',h.ctx));assert.deepEqual(readFileSync(lock),before);assert.deepEqual(h.state(),retained);
+  if(scenario!=='foreign repository'){assert.equal(h.handlers.tool_call({toolName:'bash'}).block,true);assert.ok(!h.activeTools.includes('bash'));}
+ }else{
+  if(failRelease){
+   await assert.rejects(h.commands.delivery.handler('off',h.ctx),/Injected release failure/);
+   assert.equal(h.state().enabled,true);assert.equal(h.state().leased,true);assert.equal(h.state().recoveryInvalidated,undefined);assert.equal(h.handlers.tool_call({toolName:'bash'}).block,true);
+   assert.equal(h.state().lockFence,JSON.parse(readFileSync(lock)).fence,'reconciled fence must persist for safe retry');failRelease=false;
+  }
+  await h.commands.delivery.handler('off',h.ctx);assert.throws(()=>readFileSync(lock),/ENOENT/);assert.equal(h.state().leased,false);assert.equal(h.state().enabled,false);assert.equal(h.state().recoveryInvalidated,true);assert.ok(h.activeTools.includes('bash'));
+  assert.deepEqual(h.state().reports,retained.reports);assert.deepEqual(h.state().checks,retained.checks);assert.deepEqual(h.state().recoveryAttempts,retained.recoveryAttempts);
+ }
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0,'OFF must not launch or retry work');
 });

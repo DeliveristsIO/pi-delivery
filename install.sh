@@ -45,7 +45,7 @@ configure() {
     AGENT_DIR="$(normalize_path "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}")"
     local p entry
     for p in skills/orchestrate-delivery skills/security-review skills/select-task-model \
-             agents/delivery-coder.md agents/delivery-reviewer.md agents/delivery-security.md extensions/delivery; do
+             agents/delivery-coder.md agents/delivery-reviewer.md agents/delivery-verifier.md agents/delivery-security.md extensions/delivery; do
         case "$p" in
             skills/*) entry="$ROOT/$p/SKILL.md" ;;
             agents/*) entry="$ROOT/$p" ;;

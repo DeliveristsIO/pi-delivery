@@ -3,6 +3,7 @@ import {dirname,join,resolve,isAbsolute} from 'node:path';
 import {homedir} from 'node:os';
 import {execFileSync,spawn} from 'node:child_process';
 import {createHash,randomUUID} from 'node:crypto';
+import {proveNativePrelaunch} from './prelaunch.mjs';
 export const agentDir=()=>process.env.PI_CODING_AGENT_DIR || join(homedir(),'.pi','agent');
 export const configPath=()=>join(agentDir(),'delivery.json');
 export function jsonFile(path,max=4*1024*1024) {
@@ -137,7 +138,7 @@ function withLockGuard(path,operation) {
   catch(error){if(error.code==='EEXIST')throw new Error(`Lock operation guard exists; ownership/operation closure unknown. Inspect ${guard}; no automatic removal.`);throw error;}
   try {return operation();}finally{unlinkSync(guard);}
 }
-export function acquireLock(root,owner,{active,pendingCheck}={}) {
+export function acquireLock(root,owner,{active,pendingCheck,rejectedLaunch}={}) {
   const path=lockPath(root);let retained;
   const diagnostic=error=>new Error(`Workspace delivery lock owned/stored ${ownerText(retained)}; current ${ownerText(owner)}. ${error.message} Inspect exact retained native evidence; no force unlock or replacement. Lock: ${path}`);
   function inspect() {
@@ -150,6 +151,12 @@ export function acquireLock(root,owner,{active,pendingCheck}={}) {
     if(!Number.isSafeInteger(retained.pid) || retained.pid<=0)throw new Error('Previous owner process liveness is unknown (invalid pid).');
     try {process.kill(retained.pid,0);throw new Error('Previous owner process is alive.');}
     catch(error){if(error.code!=='ESRCH')throw new Error(`Previous owner process not proven dead: ${error.message}`);}
+    if(rejectedLaunch) {
+      const {active:reservation,reason,proof}=rejectedLaunch;
+      if(reservation?.session!==owner.session || JSON.stringify(proveNativePrelaunch(reservation,reason))!==JSON.stringify(proof))
+        throw new Error('Native prelaunch refusal binding is unverified.');
+      return;
+    }
     if(!active || active.session!==owner.session)throw new Error('Known retained native worker/session evidence is required.');
     if(!readNativeClosure(active))throw new Error(`Exact native worker ${active.id} in ${active.dir} (owner=${active.nativeSession}) is live or observed process-terminal.json closure is pending/unknown. A restart cannot supply the spawning parent's missing close observation.`);
   }
@@ -167,6 +174,15 @@ export function acquireLock(root,owner,{active,pendingCheck}={}) {
       return next.fence;
     });
   }catch(error){throw diagnostic(error);}
+}
+// Inspection-only: a missing lock alone never establishes recovery authority.
+export function assertNoLock(root) {
+  if(readLock(lockPath(root)))throw new Error('A workspace lock still exists; closed reviewer adoption refuses unknown ownership.');
+}
+export function inspectLock(root,owner) {
+  const retained=readLock(lockPath(root));
+  if(!retained || retained.session!==owner.session || retained.run!==owner.run || !sameFence(retained,owner))throw new Error('Missing/foreign workspace lock or stale journal fence; recovery refused.');
+  return retained;
 }
 export function releaseLock(root,owner) {
   const path=lockPath(root);
@@ -220,6 +236,8 @@ export function readOutcome(active) {
   }
   const step=status.steps?.[0];
   if(status.steps?.length!==1 || step.agent!==active.agent || step.model!==active.model || !step.attemptedModels?.length || step.attemptedModels.some(model=>model!==active.model))throw new Error('Native worker agent/model evidence missing or differs from exact approved route');
-  if(typeof step.structuredOutputPath!=='string' || !isAbsolute(step.structuredOutputPath))throw new Error('Native worker missing structured report');
-  return jsonFile(step.structuredOutputPath,128000);
+  try {
+    if(typeof step.structuredOutputPath!=='string' || !isAbsolute(step.structuredOutputPath))throw new Error('Native worker missing structured report');
+    return jsonFile(step.structuredOutputPath,128000);
+  }catch(error){error.code='DELIVERY_STRUCTURED_REPORT';error.closed=true;error.nativeState=status.state;throw error;}
 }

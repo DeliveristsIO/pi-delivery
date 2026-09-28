@@ -1,18 +1,25 @@
 export const ROLES = ['planning', 'coder', 'quality', 'security'];
-export const AGENTS = {coder:'delivery-coder', quality:'delivery-reviewer', security:'delivery-security'};
+export const AGENTS = {coder:'delivery-coder', quality:'delivery-reviewer', security:'delivery-security',probe:'delivery-verifier',verifier:'delivery-verifier'};
 const string = maxLength => ({type:'string',minLength:1,maxLength});
 const list = (items,maxItems,minItems=0) => ({type:'array',items,minItems,maxItems});
 const object = (properties,required=Object.keys(properties)) => ({type:'object',properties,required,additionalProperties:false});
 const checks = list(string(2000),10);
+export const BROWSER_SCHEMA = object({
+  acceptance:list(string(2000),30,1), runner:string(512), probe:string(2000),
+  scenarios:list(object({name:string(200),command:string(2000)}),10,1),
+  environment:{type:'string',enum:['local','test']},target:string(2000),interactionScope:string(4000),
+  artifacts:list(object({path:string(128),kind:{type:'string',enum:['text','image']},capture:string(2000)}),10)
+});
 export const PLAN_SCHEMA = object({
   mode:{type:'string',enum:['implementation','review']}, title:string(200),
-  tasks:list(object({title:string(200),instructions:string(16000),files:list(string(512),100,1),acceptance:list(string(2000),30,1),checks,sensitive:{type:'boolean'}},['title','instructions','files','acceptance','checks']),12,1),
+  tasks:list(object({title:string(200),instructions:string(16000),files:list(string(512),100,1),acceptance:list(string(2000),30,1),checks,sensitive:{type:'boolean'},browser:BROWSER_SCHEMA},['title','instructions','files','acceptance','checks']),12,1),
   checks, security:{type:'boolean'}
 });
-export const REPORT_SCHEMA = object({status:{type:'string',enum:['approved','changes_requested','blocked']},summary:string(8000),findings:list(string(2000),50)});
+export const REPORT_SCHEMA = object({status:{type:'string',enum:['approved','changes_requested','blocked']},summary:string(8000),findings:list(string(2000),50),blockedReason:{type:'string',enum:['evidence_unavailable']}},['status','summary','findings']);
+export const VERIFIER_REPORT_SCHEMA = object({...REPORT_SCHEMA.properties,task:{type:'integer',minimum:0,maximum:11},round:{type:'integer',minimum:0,maximum:2},source:string(64),phase:{type:'string',enum:['probe','verifier']},commands:list(object({command:string(2000),exitCode:{type:'integer',minimum:0,maximum:255}}),10),artifacts:list(object({path:string(128),sha256:string(64)}),10)},['status','summary','findings','task','round','source','phase','commands','artifacts']);
 // GitHub.com only: explicit owner/repo, no URLs, traversal, flags or control characters.
 const ISSUE_REPO_PATTERN='^(?!.*\\.\\.)(?!.*[\\x00-\\x20\\x7f])[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$';
-export const SCHEMAS = {empty:object({}),plan:PLAN_SCHEMA,issues:object({repo:{...string(140),pattern:ISSUE_REPO_PATTERN},limit:{type:'integer',minimum:1,maximum:100}},['repo']),configure:object({routes:object(Object.fromEntries(ROLES.map(role=>[role,string(256)])),[])},[])};
+export const SCHEMAS = {empty:object({}),recovery_plan:object({browser:BROWSER_SCHEMA},[]),plan:PLAN_SCHEMA,issues:object({repo:{...string(140),pattern:ISSUE_REPO_PATTERN},limit:{type:'integer',minimum:1,maximum:100}},['repo']),configure:object({routes:object(Object.fromEntries(ROLES.map(role=>[role,string(256)])),[])},[])};
 
 // The public JSON schemas and runtime share this small validator (no coercion).
 export function validate(schema,value,path='input') {
@@ -39,13 +46,26 @@ export function validatePlan(input) {
     if(task.files.some(p=>p.startsWith('/') || p.startsWith(':') || /[\\*?\[]/.test(p) || p.split('/').some(part=>['.','..','.git',''].includes(part))))throw new Error('Use literal repository-relative files or directories');
     if(plan.mode==='implementation' && !task.checks.length)throw new Error('Each implementation task needs executable checks');
     if(plan.mode==='review' && task.checks.length)throw new Error('Read-only review cannot execute shell checks');
+    if(task.browser){if(plan.mode==='review')throw new Error('Read-only review cannot execute browser verification');validateBrowser(task.browser,task.acceptance);}
     if(securitySensitive(task.files))task.sensitive=true;
   }
   if(plan.mode==='review' && plan.checks.length)throw new Error('Read-only review cannot execute shell checks; supply existing evidence in instructions');
   return plan;
 }
+export function validateBrowser(browser,acceptance) {
+  validate(BROWSER_SCHEMA,browser,'browser');
+  if(browser.runner.startsWith('/') || browser.runner.split('/').some(p=>['','..','.','.git'].includes(p)) || /[\\\0]/.test(browser.runner))throw new Error('Browser runner must be repository-relative');
+  const target=new URL(browser.target);
+  if(!['http:','https:'].includes(target.protocol) || target.username || target.password || target.search || target.hash)throw new Error('Browser target must be a local/test HTTP URL without credentials, query or fragment');
+  if(browser.environment==='local' && !['localhost','127.0.0.1','[::1]'].includes(target.hostname))throw new Error('Local browser target must be loopback');
+  if(browser.acceptance.some(a=>!acceptance.includes(a)))throw new Error('Browser acceptance must reference approved task criteria');
+  if(new Set(browser.scenarios.map(s=>s.name)).size!==browser.scenarios.length)throw new Error('Duplicate browser scenario');
+  if(new Set(browser.artifacts.map(a=>a.path)).size!==browser.artifacts.length || browser.artifacts.some(a=>! /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(a.path) || a.path.includes('..')))throw new Error('Unsafe/duplicate browser artifact path');
+  return browser;
+}
 export function validateReport(report) {
   validate(REPORT_SCHEMA,report,'report');
+  if(report.blockedReason && (report.status!=='blocked' || report.findings.length))throw new Error('Typed evidence block requires blocked status and no unresolved defects');
   if(report.status==='approved' && report.findings.length)throw new Error('Approved report has unresolved findings');
   if(report.status==='changes_requested' && !report.findings.length)throw new Error('Correction report needs concrete findings');
   return report;
@@ -58,7 +78,7 @@ export function validateRoutes(routes,available,roles=ROLES) {
   }));
 }
 export function isApproval(text) {
-  return /^(?:approved|approve(?: the (?:displayed )?plan)?|(?:please )?(?:implement|execute)(?: the| this)? (?:displayed |unchanged )?plan|go ahead)[.!]?$/i.test(text.trim());
+  return /^(?:approval|approved|(?:i )?approve(?: the (?:displayed )?plan)?|yes(?:,? please)?|ok(?:ay)?|proceed|(?:please )?(?:implement|execute)(?: the| this)? (?:displayed |unchanged )?plan|go ahead)[.!]?$/i.test(text.trim());
 }
 export const securitySensitive=files=>/auth|bank|payment|secret|upload|dependenc|deploy|network|permission|package(-lock)?\.json|Gemfile|\.github/i.test(files.join('\n'));
 export const inScope=(path,files)=>files.some(file=>path===file || path.startsWith(file+'/'));

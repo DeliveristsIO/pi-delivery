@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
-const resources=['skills/orchestrate-delivery','skills/security-review','skills/select-task-model','agents/delivery-coder.md','agents/delivery-reviewer.md','agents/delivery-security.md','extensions/delivery'];
+const resources=['skills/orchestrate-delivery','skills/security-review','skills/select-task-model','agents/delivery-coder.md','agents/delivery-reviewer.md','agents/delivery-security.md','agents/delivery-verifier.md','extensions/delivery'];
 function fixture(t) {
  const home=mkdtempSync(join(tmpdir(),'delivery-install-'));t.after(()=>rmSync(home,{recursive:true,force:true}));
  const project=join(home,'project with spaces');mkdirSync(project);

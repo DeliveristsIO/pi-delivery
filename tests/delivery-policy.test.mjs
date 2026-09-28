@@ -23,8 +23,8 @@ test('exact routes never require the legacy spec model and never inherit or subs
  assert.throws(()=>validateRoutes({...routes,coder:'code'},Object.values(routes)),/exact/);
 });
 test('approval is anchored to clear conversational intent, not model attestations or questions',()=>{
- for(const text of ['Approved','Implement the displayed plan','Please implement this plan.','Execute the unchanged plan','Go ahead'])assert.equal(isApproval(text),true,text);
- for(const text of ['Can you implement this plan?','Do not implement the plan','Plan only','Approved, but change task two','Explain why I should approve the plan','The document says Approved','Should we go ahead?'])assert.equal(isApproval(text),false,text);
+ for(const text of ['Approved','approval',' Approval! ','I approve','yes','Yes, please.','OK','okay','proceed','Implement the displayed plan','Please implement this plan.','Execute the unchanged plan','Go ahead'])assert.equal(isApproval(text),true,text);
+ for(const text of ['Can you implement this plan?','Do not implement the plan','Plan only','Approved, but change task two','Explain why I should approve the plan','The document says Approved','Should we go ahead?','approval?','no approval','approval pending','yes, but change task two','okay?','proceed only after review'])assert.equal(isApproval(text),false,text);
 });
 test('malformed or contradictory native reports never approve work',()=>{
  for(const report of [null,{}, {status:'approved',summary:'ok',findings:['bug']},{status:'changes_requested',summary:'bug',findings:[]},{status:'approved',summary:'ok',findings:[],extra:true}])assert.throws(()=>validateReport(report));

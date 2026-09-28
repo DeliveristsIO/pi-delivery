@@ -36,6 +36,10 @@
     "docs/configuration.md",
     "docs/roadmap.md",
     "docs/releasing.md",
-    "LICENSE"
+    "LICENSE",
+    "extensions/delivery/evidence.mjs",
+    "extensions/delivery/recovery.mjs",
+    "extensions/delivery/prelaunch.mjs",
+    "agents/delivery-verifier.md"
   ]
 }

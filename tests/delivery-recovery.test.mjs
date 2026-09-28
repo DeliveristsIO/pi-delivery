@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import * as io from '../extensions/delivery/io.mjs';
+import {closedReviewerOutputFailure} from '../extensions/delivery/recovery.mjs';
 
 import {terminalProof} from './helpers/native-artifacts.mjs';
 function fixture(t,{legacy=true}={}) {
@@ -23,6 +24,14 @@ function fixture(t,{legacy=true}={}) {
  else owner.fence=current.fence=JSON.parse(readFileSync(lock)).fence;
  return {root,agent,dir,owner,current,active,status,write,lock};
 }
+test('closed failed reviewer with missing structured tool call is eligible only for fresh review, not verdict',t=>{
+ const f=fixture(t),status={...f.status,state:'failed',error:'Missing structured_output call; this step has outputSchema and must finish by calling structured_output.',steps:[{...f.status.steps[0],structuredOutputPath:join(f.dir,'missing.json'),status:'failed',error:'Missing structured_output call; this step has outputSchema and must finish by calling structured_output.',effects:{settlementDiagnostic:{mutation:{expected:false,attempted:false,observed:false},requiredOutput:{kind:'structured',path:join(f.dir,'missing.json'),missing:true}}}}]};
+ f.write('status.json',status);
+ assert.equal(closedReviewerOutputFailure({...f.active,stage:'quality'},io.readNativeClosure(f.active)).reason,'review_report_invalid');
+ assert.throws(()=>closedReviewerOutputFailure({...f.active,stage:'quality'},{status:{...status,error:'Provider failed'},terminal:terminalProof()}),/not eligible/i);
+ assert.throws(()=>closedReviewerOutputFailure({...f.active,stage:'quality'},{status,terminal:terminalProof('native',{instances:[{...terminalProof().instances[0],exitCode:1}]})}),/not eligible/i);
+ assert.throws(()=>closedReviewerOutputFailure({...f.active,stage:'coder',agent:'delivery-coder'},io.readNativeClosure(f.active)),/not eligible/i);
+});
 test('same-session restarted pid reclaims exact lock only after native observed closure',t=>{
  const f=fixture(t);f.current.fence=io.acquireLock(f.root,f.current,{active:f.active});
  assert.deepEqual(JSON.parse(readFileSync(f.lock)),f.current);assert.equal(io.readOutcome(f.active).status,'approved');
@@ -146,4 +155,16 @@ test('same-process reload respects the current fence; stale acquire/release cann
  assert.throws(()=>io.releaseLock(f.root,stale),/ownership/);
  assert.deepEqual(readFileSync(f.lock),before);
  io.releaseLock(f.root,f.current);
+});
+test('recovery fence inspection writes nothing and refuses stale copies after release (OFF handoff)',t=>{
+ const f=fixture(t,{legacy:false});const before=readFileSync(f.lock);assert.equal(io.inspectLock(f.root,f.current).fence,f.current.fence);assert.deepEqual(readFileSync(f.lock),before);
+ f.current.fence=io.acquireLock(f.root,f.current,{active:f.active});assert.throws(()=>io.inspectLock(f.root,f.owner),/stale/);
+ io.releaseLock(f.root,f.current);assert.throws(()=>io.inspectLock(f.root,f.current),/Missing/);
+ const newer={...f.current,run:'new-plan',fence:undefined};newer.fence=io.acquireLock(f.root,newer);assert.throws(()=>io.inspectLock(f.root,f.current),/foreign|stale/);io.releaseLock(f.root,newer);
+});
+test('missing structured report is typed only after exact model identity and observed closure',t=>{
+ const f=fixture(t);const status=structuredClone(f.status);delete status.steps[0].structuredOutputPath;f.write('status.json',status);
+ assert.throws(()=>io.readOutcome(f.active),e=>e.code==='DELIVERY_STRUCTURED_REPORT'&&e.closed===true);
+ f.write('process-terminal.json',terminalProof('native',{state:'pending'}));assert.equal(io.readOutcome(f.active),null);
+ f.write('process-terminal.json',terminalProof());status.steps[0].model='foreign/model';f.write('status.json',status);assert.throws(()=>io.readOutcome(f.active),e=>e.code!=='DELIVERY_STRUCTURED_REPORT'&&/model/.test(e.message));
 });
