@@ -20,7 +20,7 @@ function harness({initialTools=['read','bash','write','subagent'],entries=[],rep
  }};
  const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>activeTools.length?[...activeTools]:initialTools,setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async(model)=>{modelSets.push(model);return true;}};
  const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true,select:async()=>null},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
- const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
+ const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},autoContinue:false,verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  if(realLocksRoot){ctx.cwd=realLocksRoot;deps.repoRoot=()=>realLocksRoot;deps.acquireLock=acquireLock;deps.releaseLock=releaseLock;}
  registerDelivery(pi,undefined,{...deps,...overrides});
  const invoke=(name,args={})=>tools[name].execute('call',args,undefined,undefined,ctx);
@@ -90,6 +90,34 @@ test('continue after exhausted correction rounds displays a scoped fresh proposa
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,before);
  const proposal=h.state().run;await h.input('continue');assert.equal(h.state().run,proposal,'repeat continue never replans or approves');
  await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+});
+const settle=async(h,done)=>{for(let i=0;i<500;i++){if(done(h.state()))return h.state();await new Promise(r=>setTimeout(r,2));}throw new Error(`did not settle: ${h.state()?.stage}`);};
+test('exhausted corrections auto-continue once under the original approval with the same scope',async()=>{
+ const finding={status:'changes_requested',summary:'SQLite race remains',findings:['high: a:40 handle busy']};
+ const h=harness({reports:[approved,finding,approved,finding,approved,finding],overrides:{autoContinue:true}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ const s=await settle(h,s=>s?.stage==='complete' && s.autoContinuations===1);
+ assert.equal(s.inheritedApproval.title,'Bounded change');assert.match(s.plan.tasks[0].instructions,/SQLite race remains/);
+ assert.deepEqual(s.plan.tasks[0].files,['a']);assert.deepEqual(s.plan.checks,['final']);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,4);
+ assert.ok(h.messages.some(m=>/Auto-continuing run .* under its original approval \(1\/1\)/.test(m.content)));
+ assert.ok(h.saved.some(e=>e.customType==='delivery-superseded-v1'));
+});
+test('an auto-continuation that blocks again waits for the user',async()=>{
+ const finding={status:'changes_requested',summary:'Still broken',findings:['high: a:1 still broken']};
+ const h=harness({readOutcome:active=>active.agent==='delivery-reviewer'?finding:approved,overrides:{autoContinue:true}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ const s=await settle(h,s=>s?.stage==='blocked' && s.autoContinuations===1);await new Promise(r=>setTimeout(r,20));
+ assert.equal(h.state().stage,'blocked');assert.equal(h.state().run,s.run);assert.match(s.reason,/Correction round limit/);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,6);
+ await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+});
+test('check-failure exhaustion derives a continuation from the failing receipt',async()=>{
+ const snapshot={a:'hash',unrelated:'dirty'};let edits=0;
+ const h=harness({checkCode:1,snapshot,readOutcome:active=>{if(active.stage==='coder')snapshot.a=`hash-${++edits}`;return approved;}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ assert.equal((await h.wait()).stage,'blocked');await h.input('continue');
+ assert.equal(h.state().stage,'awaiting-approval');assert.match(h.state().plan.tasks[0].instructions,/Task check still failing: task-one/);
 });
 test('review-only does not execute checks or a writer and findings cannot launch fixes',async()=>{
  const h=harness({reports:[{status:'changes_requested',summary:'Bug',findings:['a:1 bug']}]});await h.start();await h.commands.delivery.handler('on',h.ctx);const p=plan();p.mode='review';p.tasks[0].checks=[];p.checks=[];await h.invoke('delivery_plan',p);await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.equal(s.checks.length,0);assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-reviewer']);
