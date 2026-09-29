@@ -18,7 +18,7 @@ Delivery reads `delivery.json` from `PI_CODING_AGENT_DIR` or `~/.pi/agent`. Exis
 
 Use real exact IDs from the installed catalog, not these placeholders. Availability is not proof of successful inference. Every native launch specifies its exact model; no silent substitution or fallback. Combined specification/quality review uses `quality`. `spec`, `repos`, old profiles, fallback lists and old timeout/correction settings are retained in the file for compatibility but do not operate runtime machinery. Enabling delivery is an explicit session action, never automatic from `repos`.
 
-`delivery_configure` without arguments shows routes and catalog metadata. Changes require native confirmation of exact provider/model IDs and are allowed only outside a pending plan or unresolved run. `/delivery setup` is the interactive alternative. Both preserve unrelated configuration fields. Providers receive approved task context and bounded source/diff/check evidence; review data boundaries before approving.
+`delivery_configure` without arguments shows routes and catalog metadata. Changes require native confirmation of exact provider/model IDs and are allowed only outside a pending plan or unresolved run. `/delivery setup` is the interactive alternative. Both preserve unrelated configuration fields. While delivery is enabled, both immediately reselect the configured planning model in the parent session; if that selection fails, routes stay saved and the error says to use /model or off/on. Providers receive approved task context and bounded source/diff/check evidence; review data boundaries before approving.
 
 ## Read-only issue research
 

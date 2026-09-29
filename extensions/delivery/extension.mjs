@@ -103,6 +103,13 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     state.enabled=true;closed=false;restrictTools();save();
   }
   function release() {if(state.leased){d.releaseLock(root,owner());state.leased=false;state.handoffProof=null;}}
+  async function applyPlanningRoute(routes) {
+    if(legacy || !state.enabled || closed)return;
+    try {
+      const route=validateRoutes(routes,available().map(id),['planning']).planning;
+      if(!await pi.setModel(available().find(model=>id(model)===route)))throw new Error('model not in catalog');
+    }catch(error){throw new Error(`Routes saved, but the planning model could not be reselected: ${error.message}. Use /model or off/on to apply it.`);}
+  }
   function settlePrelaunchRejection() {
     if(!state.active || state.active.id!==null || state.active.dir!==null || state.stage!=='blocked' ||
       !state.leased || state.pendingCheck || preparing || job)throw new Error(unknownLaunchDiagnostic());
@@ -488,7 +495,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       idle();if(state.stage!=='planning' && state.stage!=='complete' && state.stage!=='stopped')throw new Error('Finish or stop the current proposal/run before changing routes.');
       validateRoutes({...current.routes,...args.routes},available().map(id),Object.keys(args.routes));
       if(!ctx.hasUI || !await ctx.ui.confirm('Delivery model routes',`Send approved context to these exact provider/models?\n${JSON.stringify(args.routes)}`))throw new Error('Route changes require native confirmation.');
-      d.saveConfig(d.configPath(),{...current,routes:{...current.routes,...args.routes}});return result('Routes saved; other legacy settings retained but not executed.');
+      d.saveConfig(d.configPath(),{...current,routes:{...current.routes,...args.routes}});await applyPlanningRoute({...current.routes,...args.routes});return result('Routes saved; other legacy settings retained but not executed.');
     }]
   ])pi.registerTool({name:`delivery_${name}`,label:`Delivery ${name}`,description,parameters:schemas[name] || schemas.empty || SCHEMAS.empty,async execute(_id,args,_signal,_update,context){ctx=context;validate(SCHEMAS[name] || SCHEMAS.empty,args);return fn(args,_signal);}});
 
@@ -502,7 +509,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       if(!ctx.hasUI)throw new Error('Setup requires interactive/RPC UI. Configure exact routes interactively.');
       const current=config(),routes={...current.routes},models=available();
       for(const role of ROLES){const selected=await ctx.ui.select(`${role}: ${ROLE_HELP[role]}`,models.map(modelLabel));if(!selected)return;routes[role]=id(models[models.map(modelLabel).indexOf(selected)]);}
-      if(await ctx.ui.confirm('Delivery provider consent',`Approved context will be sent to these providers.\n${JSON.stringify(routes)}`))d.saveConfig(d.configPath(),{...current,routes});return;
+      if(await ctx.ui.confirm('Delivery provider consent',`Approved context will be sent to these providers.\n${JSON.stringify(routes)}`)) {d.saveConfig(d.configPath(),{...current,routes});await applyPlanningRoute(routes);}return;
     }
     guard();
     if(action==='approve'){approval=true;return state.stage==='awaiting-recovery-approval'?recoveryExecute():execute();}

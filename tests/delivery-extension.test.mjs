@@ -11,15 +11,15 @@ import {join} from 'node:path';
 const plan=()=>({mode:'implementation',title:'Bounded change',tasks:[{title:'One',instructions:'Implement one',files:['a'],acceptance:['Works'],checks:['task-one']}],checks:['final'],security:false});
 const approved={status:'approved',summary:'Inspected source and evidence',findings:[]};
 function harness({initialTools=['read','bash','write','subagent'],entries=[],reports=[],live=false,spawnError=false,checkCode=0,snapshot={a:"hash",unrelated:"dirty"},onSave=()=>{},releaseError=false,delayPing=0,sessionId='session',sessionFile,spawn,readOutcome:outcome,onLock=()=>{},realLocksRoot,nativeStatus=()=>({state:'running'}),overrides={}}={}) {
- const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries],activeTools=[];let n=0;
+ const handlers={},tools={},commands={},calls=[],messages=[],saved=[...entries],activeTools=[],modelSets=[];let n=0;
  const models=['planning','coder','quality','security'].map(id=>({provider:'test',id}));
  const events={listeners:new Map(),on(k,f){this.listeners.set(k,f);return()=>this.listeners.delete(k);},emit(k,r){if(!k.endsWith(':request'))return;calls.push(r);let data={version:1,capabilities:{asyncSpawn:true,processTerminalProof:{version:1}},methods:['spawn','status','stop']};
  if(r.method==='spawn')data={details:spawn?spawn(r.params,++n):{runId:`run-${++n}`,asyncDir:`/artifacts/${n}`}};
  if(r.method==='status')data={fleet:{totalActive:0}};
  const reply=()=>this.listeners.get(`subagents:rpc:v1:reply:${r.requestId}`)({version:1,requestId:r.requestId,success:!(spawnError&&r.method==='spawn'),data,error:{message:'Provider unavailable'}});if(r.method==='ping'&&delayPing)setTimeout(reply,delayPing);else reply();
  }};
- const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>activeTools.length?[...activeTools]:initialTools,setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async()=>true};
- const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
+ const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>activeTools.length?[...activeTools]:initialTools,setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async(model)=>{modelSets.push(model);return true;}};
+ const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true,select:async()=>null},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
  const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  if(realLocksRoot){ctx.cwd=realLocksRoot;deps.repoRoot=()=>realLocksRoot;deps.acquireLock=acquireLock;deps.releaseLock=releaseLock;}
  registerDelivery(pi,undefined,{...deps,...overrides});
@@ -27,7 +27,7 @@ function harness({initialTools=['read','bash','write','subagent'],entries=[],rep
  const input=text=>handlers.input({text,source:'interactive'},ctx);
  const state=()=>saved.filter(e=>e.customType==='delivery-coordinator-v2').at(-1)?.data;
  const wait=async()=>{for(let i=0;i<200;i++){if(['complete','blocked','stopped'].includes(state()?.stage))return state();await new Promise(r=>setTimeout(r,2));}throw new Error('did not settle');};
- return {handlers,tools,commands,calls,messages,saved,ctx,deps,activeTools,invoke,input,state,wait,start:()=>handlers.session_start({},ctx)};
+ return {handlers,tools,commands,calls,messages,saved,ctx,deps,activeTools,modelSets,invoke,input,state,wait,start:()=>handlers.session_start({},ctx)};
 }
 
 test('completed review continuation prepares the next plan without resume or permission-to-plan loops',async()=>{
@@ -170,6 +170,23 @@ test('failed reviewer without verified native closure retains exact worker and l
  await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
  const s=await h.wait();assert.equal(s.stage,'blocked');assert.equal(s.leased,true);assert.ok(s.active?.id);assert.equal(s.failure.reason,'infrastructure_or_product_failure');
  await assert.rejects(h.invoke('delivery_recovery_plan'));assert.equal(h.calls.filter(c=>c.method==='spawn').length,2);
+});
+test('confirmed route changes and setup reselect the planning model immediately while enabled',async()=>{
+ let savedRoutes=null;
+ const h=harness({overrides:{
+  loadConfig:()=>({version:1,routes:{planning:'test/planning',coder:'test/coder',quality:'test/quality',security:'test/security'},repos:['/workspace']}),
+  configPath:()=>'isolated-delivery.json',
+  saveConfig:(_path,c)=>{savedRoutes=c.routes;}
+ }});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);
+ assert.deepEqual(h.modelSets,[{provider:'test',id:'planning'}]);
+ await h.invoke('delivery_configure',{routes:{quality:'test/security'}});
+ assert.equal(savedRoutes.quality,'test/security');
+ assert.deepEqual(h.modelSets,[{provider:'test',id:'planning'},{provider:'test',id:'planning'}]);
+ h.ctx.ui.select=async(_,options)=>options[0];
+ await h.commands.delivery.handler('setup',h.ctx);
+ assert.deepEqual(savedRoutes.quality,'test/planning');
+ assert.deepEqual(h.modelSets,Array(3).fill({provider:'test',id:'planning'}));
 });
 test('malformed worker report blocks rather than implying approval',async()=>{
  const h=harness({reports:[{status:'approved',summary:'ok',findings:['unresolved']}]});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');assert.match((await h.wait()).reason,/report/i);
