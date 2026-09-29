@@ -4,7 +4,7 @@ A thin SPARK coordinator for [Pi](https://github.com/earendil-works/pi). SPARK g
 
 ## Flow
 
-**Plan → explicit approval → declared browser capability probes → implement → task checks → declared browser verification → independent combined specification/quality review → security review when sensitive → report.** Final checks run only after all tasks pass review. Concrete task-check/review failures allow at most two correction rounds under the unchanged approval. Infrastructure failures stop; there are no automatic retries or fallback models.
+**Plan → launch (autonomous by default; `"approval": "manual"` restores explicit approval) → declared browser capability probes → implement → task checks → declared browser verification → independent combined specification/quality review → security review when sensitive → report.** Final checks run only after all tasks pass review. Concrete task-check/review failures allow at most two correction rounds under the unchanged approval. Infrastructure failures stop; there are no automatic retries or fallback models.
 
 Task `files` are starting points, not a writer permission list. Within the approved product task, the coder follows related code, updates directly necessary files/tests and fixes task-related check failures without per-file approval. Actual changed paths accumulate across corrections and appear in reviews/status; independent reviewers reject unrelated work. New requirements, ambiguous outcomes, destructive actions, dependencies and provider changes remain unauthorized. Implementation plans bind the configured security route up front so newly discovered sensitive paths receive independent security review without model substitution.
 

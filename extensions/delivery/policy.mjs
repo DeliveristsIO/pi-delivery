@@ -79,8 +79,8 @@ export function validateRoutes(routes,available,roles=ROLES) {
 }
 // Flexible approval: every word must be affirmative vocabulary (typos tolerated),
 // so questions, negations, conditions and unrelated sentences still never launch.
-const APPROVAL_CORE=['approval','approved','approve','yes','yep','yeah','yup','sure','ok','okay','proceed','implement','execute','go','ahead','lgtm','ship','launch','run','start','confirm','confirmed','accept','accepted','agreed','do'];
-const APPROVAL_FILLER=['i','the','this','that','it','displayed','unchanged','plan','please','pls','lets','let\'s','now','and','all','good','fine','looks','sounds','great','perfect','thanks','thank','you','ty','go','for','with','👍','✅'];
+const APPROVAL_CORE=['approval','approved','approve','yes','yep','yeah','yup','ya','yea','y','sure','ok','okay','k','kk','alright','right','correct','proceed','continue','carry','implement','execute','go','ahead','lgtm','ship','launch','run','start','confirm','confirmed','accept','accepted','agree','agreed','do','good','great','perfect','fine','cool','nice','awesome','excellent','sounds','works','done','absolutely','definitely','certainly','indeed','👍','✅','👌','🚀','💯'];
+const APPROVAL_FILLER=['i','the','this','that','it','displayed','unchanged','plan','please','pls','plz','lets','let\'s','now','and','all','looks','thanks','thank','you','ty','for','with','on','with','me','to','by','very','so','then','just','totally','really','yes','go'];
 const editDistance=(a,b)=>{
   const row=Array.from({length:b.length+1},(_,i)=>i);
   for(let i=1;i<=a.length;i++){let prev=row[0];row[0]=i;for(let j=1;j<=b.length;j++){const temp=row[j];row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));prev=temp;}}
@@ -98,7 +98,7 @@ export function isApproval(text) {
     if(fuzzyCore(word)){core=true;continue;}
     if(!APPROVAL_FILLER.includes(word))return false;
   }
-  return core || words.every(word=>['👍','✅'].includes(word));
+  return core;
 }
 export const securitySensitive=files=>/auth|bank|payment|secret|upload|dependenc|deploy|network|permission|package(-lock)?\.json|Gemfile|\.github/i.test(files.join('\n'));
 export const inScope=(path,files)=>files.some(file=>path===file || path.startsWith(file+'/'));

@@ -24,8 +24,8 @@ test('exact routes never require the legacy spec model and never inherit or subs
 });
 test('approval is anchored to clear conversational intent, not model attestations or questions',()=>{
  for(const text of ['Approved','approval',' Approval! ','I approve','yes','Yes, please.','OK','okay','proceed','Implement the displayed plan','Please implement this plan.','Execute the unchanged plan','Go ahead',
-  'arroved','aproved','approvd','Approoved!','yep','sure','lgtm','ship it','do it','yes go ahead','ok approved','Looks good, proceed','👍','approved, thanks'])assert.equal(isApproval(text),true,text);
- for(const text of ['continue','unapproved','disapproved','not approved','nope','reject','wait','no','Approved but only task one'])assert.equal(isApproval(text),false,text);
+  'arroved','aproved','approvd','Approoved!','yep','sure','lgtm','ship it','do it','yes go ahead','ok approved','Looks good, proceed','👍','approved, thanks','continue','Continue.','good','great','perfect','fine','cool','nice','alright','correct','sounds good','works for me','go on','carry on','👌','🚀','k','agree'])assert.equal(isApproval(text),true,text);
+ for(const text of ['unapproved','stop','do not continue','hold on','incorrect','not good','cancel','later','disapproved','not approved','nope','reject','wait','no','Approved but only task one'])assert.equal(isApproval(text),false,text);
  for(const text of ['Can you implement this plan?','Do not implement the plan','Plan only','Approved, but change task two','Explain why I should approve the plan','The document says Approved','Should we go ahead?','approval?','no approval','approval pending','yes, but change task two','okay?','proceed only after review'])assert.equal(isApproval(text),false,text);
 });
 test('malformed or contradictory native reports never approve work',()=>{
