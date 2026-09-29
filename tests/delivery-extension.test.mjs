@@ -210,10 +210,11 @@ test('reload after native infrastructure failure monitors original worker stage 
 test('planning-only input invalidates earlier approval and replacing the proposal requires a new turn',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.input('Just explain the plan');await assert.rejects(h.invoke('delivery_execute'),/approval/);await h.input('Approved');await h.invoke('delivery_plan',plan());await assert.rejects(h.invoke('delivery_execute'),/approval/);
 });
-test('parent tool hooks deny writers, shell, external tools and native delegation',async()=>{
+test('delivery never strips or blocks the session tools, so work can always continue',async()=>{
  const h=harness();await h.start();await h.commands.delivery.handler('on',h.ctx);
- for(const toolName of ['bash','write','edit','subagent','custom_mutator'])assert.equal(h.handlers.tool_call({toolName}).block,true);
- assert.equal(h.handlers.tool_call({toolName:'read'}),undefined);assert.throws(()=>h.handlers.user_bash({command:'true'}),/shell/);
+ for(const toolName of ['read','bash','write','subagent'])assert.ok(h.activeTools.includes(toolName),toolName);
+ assert.ok(h.activeTools.includes('delivery_plan'));
+ assert.equal(h.handlers.tool_call,undefined);assert.equal(h.handlers.user_bash,undefined);
 });
 test('legacy off cannot write a new entry that hides unresolved old ownership',async()=>{
  const old={type:'custom',customType:'delivery-mode-v1',data:{stage:'coder',active:{id:'unknown'}}};const h=harness({entries:[old]});await h.start();await assert.rejects(h.commands.delivery.handler('off',h.ctx),/legacy|unsupported/i);assert.deepEqual(h.saved,[old]);
@@ -481,7 +482,7 @@ test('resume and stop are public empty-schema tools allowed by the parent gate',
  for(const name of ['delivery_resume','delivery_stop']) {
   assert.ok(h.tools[name]);assert.ok(h.activeTools.includes(name));assert.deepEqual(h.tools[name].parameters.properties,{});
   assert.equal(h.tools[name].parameters.additionalProperties,false);
-  assert.equal(h.handlers.tool_call({toolName:name}),undefined);
+  assert.equal(h.handlers.tool_call,undefined);
   await assert.rejects(h.invoke(name,{message:'replace the worker'}),/unsupported/);
  }
 });
@@ -541,7 +542,7 @@ for(const outcome of ['complete','failed','stopped','stop requested','missing pr
 test('pure issue research is available through active allowlist and hook without snapshot, proposal, approval or native launch',async()=>{
  let reads=0;const h=harness({overrides:{snapshot:()=>assert.fail('research must not snapshot'),readIssues:async args=>{reads++;assert.deepEqual(args,{repo:'Owner/repo',limit:5});return {content:[{type:'text',text:'Untrusted issue data'}],details:{issues:[]}};}}});
  await h.start();await h.commands.delivery.handler('on',h.ctx);
- assert.ok(h.tools.delivery_issues);assert.ok(h.activeTools.includes('delivery_issues'));assert.equal(h.handlers.tool_call({toolName:'delivery_issues'}),undefined);
+ assert.ok(h.tools.delivery_issues);assert.ok(h.activeTools.includes('delivery_issues'));assert.equal(h.handlers.tool_call,undefined);
  assert.equal(h.tools.delivery_issues.parameters.additionalProperties,false);assert.equal(h.tools.delivery_issues.parameters.properties.repo.type,'string');
  await h.invoke('delivery_issues',{repo:'Owner/repo',limit:5});assert.equal(reads,1);assert.equal(h.state().plan,null);assert.equal(h.calls.length,0);
  await assert.rejects(h.invoke('delivery_issues',{repo:'Owner/repo',command:'edit'}),/unsupported/);assert.equal(reads,1);
@@ -613,7 +614,7 @@ for(const mutation of ['snapshot','routes','closure','pending','unknown','stop',
  await r.start();await assert.rejects(r.invoke('delivery_recovery_plan'));assert.equal(r.calls.filter(c=>c.method==='spawn').length,0);
 });
 test('OFF explicitly invalidates closed recovery and restores shell; ON never revives it',async t=>{
- const h=browserHarness(t,{failEvidence:true});await executePlan(h,fourTaskPlan());await h.commands.delivery.handler('off',h.ctx);assert.ok(h.activeTools.includes('bash'));assert.equal(h.handlers.tool_call({toolName:'bash'}),undefined);
+ const h=browserHarness(t,{failEvidence:true});await executePlan(h,fourTaskPlan());await h.commands.delivery.handler('off',h.ctx);assert.ok(h.activeTools.includes('bash'));assert.equal(h.handlers.tool_call,undefined);
  assert.match(textOf(await h.invoke('delivery_status')),/unmanaged handoff.*invalidated recovery/i);await assert.rejects(h.invoke('delivery_resume'),/invalidated recovery/i);
  await h.commands.delivery.handler('on',h.ctx);await assert.rejects(h.invoke('delivery_recovery_plan'),/invalidated recovery/i);assert.equal(h.order.filter(x=>x==='coder').length,1);
 });
@@ -636,7 +637,7 @@ test('OFF after reload restores original available tools, never the restricted c
  await r.commands.delivery.handler('on',r.ctx);await r.commands.delivery.handler('off',r.ctx);assert.ok(r.activeTools.includes('bash'));assert.match(textOf(await r.invoke('delivery_status')),/invalidated recovery/);
 });
 test('OFF release failure keeps coordination ON and recovery fence intact',async t=>{
- const h=browserHarness(t,{failEvidence:true,releaseError:true});await executePlan(h,fourTaskPlan());await assert.rejects(h.commands.delivery.handler('off',h.ctx),/Lock ownership changed/);assert.equal(h.state().enabled,true);assert.equal(h.state().recoveryInvalidated,undefined);assert.equal(h.handlers.tool_call({toolName:'bash'}).block,true);
+ const h=browserHarness(t,{failEvidence:true,releaseError:true});await executePlan(h,fourTaskPlan());await assert.rejects(h.commands.delivery.handler('off',h.ctx),/Lock ownership changed/);assert.equal(h.state().enabled,true);assert.equal(h.state().recoveryInvalidated,undefined);assert.ok(h.activeTools.includes('bash'));
 });
 test('old closed journals cannot acquire new recovery authority from error text',async t=>{
  const old={version:2,enabled:true,root:'/workspace',session:'session',run:'old',stage:'blocked',plan:plan(),task:0,round:0,reports:[],checks:[],reason:'missing browser evidence',snapshot:{a:'hash'}};
@@ -755,11 +756,11 @@ for(const scenario of ['closed','recovery ping failure','recovery fleet failure'
  }
  if(!['closed','recovery ping failure','recovery fleet failure','exhausted recovery','release failure'].includes(scenario)){
   await assert.rejects(h.commands.delivery.handler('off',h.ctx));assert.deepEqual(readFileSync(lock),before);assert.deepEqual(h.state(),retained);
-  if(scenario!=='foreign repository'){assert.equal(h.handlers.tool_call({toolName:'bash'}).block,true);assert.ok(!h.activeTools.includes('bash'));}
+  if(scenario!=='foreign repository'){assert.ok(h.activeTools.includes('bash'));}
  }else{
   if(failRelease){
    await assert.rejects(h.commands.delivery.handler('off',h.ctx),/Injected release failure/);
-   assert.equal(h.state().enabled,true);assert.equal(h.state().leased,true);assert.equal(h.state().recoveryInvalidated,undefined);assert.equal(h.handlers.tool_call({toolName:'bash'}).block,true);
+   assert.equal(h.state().enabled,true);assert.equal(h.state().leased,true);assert.equal(h.state().recoveryInvalidated,undefined);assert.ok(h.activeTools.includes('bash'));
    assert.equal(h.state().lockFence,JSON.parse(readFileSync(lock)).fence,'reconciled fence must persist for safe retry');failRelease=false;
   }
   await h.commands.delivery.handler('off',h.ctx);assert.throws(()=>readFileSync(lock),/ENOENT/);assert.equal(h.state().leased,false);assert.equal(h.state().enabled,false);assert.equal(h.state().recoveryInvalidated,true);assert.ok(h.activeTools.includes('bash'));

@@ -77,8 +77,28 @@ export function validateRoutes(routes,available,roles=ROLES) {
     return [role,id];
   }));
 }
+// Flexible approval: every word must be affirmative vocabulary (typos tolerated),
+// so questions, negations, conditions and unrelated sentences still never launch.
+const APPROVAL_CORE=['approval','approved','approve','yes','yep','yeah','yup','sure','ok','okay','proceed','implement','execute','go','ahead','lgtm','ship','launch','run','start','confirm','confirmed','accept','accepted','agreed','do'];
+const APPROVAL_FILLER=['i','the','this','that','it','displayed','unchanged','plan','please','pls','lets','let\'s','now','and','all','good','fine','looks','sounds','great','perfect','thanks','thank','you','ty','go','for','with','👍','✅'];
+const editDistance=(a,b)=>{
+  const row=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){let prev=row[0];row[0]=i;for(let j=1;j<=b.length;j++){const temp=row[j];row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));prev=temp;}}
+  return row[b.length];
+};
+const fuzzyCore=word=>APPROVAL_CORE.some(target=>word===target ||
+  (word.length>=5 && target.length>=5 && word[0]===target[0] && !/^(?:un|dis|non)/.test(word) && editDistance(word,target)<=(target.length>=7?2:1)));
 export function isApproval(text) {
-  return /^(?:approval|approved|(?:i )?approve(?: the (?:displayed )?plan)?|yes(?:,? please)?|ok(?:ay)?|proceed|(?:please )?(?:implement|execute)(?: the| this)? (?:displayed |unchanged )?plan|go ahead)[.!]?$/i.test(text.trim());
+  const normalized=String(text).trim().toLowerCase();
+  if(!normalized || normalized.length>120 || normalized.includes('?'))return false;
+  const words=normalized.replace(/[.!,;:]+/g,' ').split(/\s+/).filter(Boolean);
+  if(!words.length || words.length>10)return false;
+  let core=false;
+  for(const word of words) {
+    if(fuzzyCore(word)){core=true;continue;}
+    if(!APPROVAL_FILLER.includes(word))return false;
+  }
+  return core || words.every(word=>['👍','✅'].includes(word));
 }
 export const securitySensitive=files=>/auth|bank|payment|secret|upload|dependenc|deploy|network|permission|package(-lock)?\.json|Gemfile|\.github/i.test(files.join('\n'));
 export const inScope=(path,files)=>files.some(file=>path===file || path.startsWith(file+'/'));
