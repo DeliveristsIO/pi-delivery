@@ -15,7 +15,7 @@ const PARENT_TOOLS=[...READ_TOOLS,'delivery_issues','delivery_plan','delivery_ex
 const MAX_CORRECTIONS=2;
 // Continuations of an already approved plan (same files/checks, remaining tasks only)
 // launch under that approval before asking the user again.
-const MAX_AUTO_CONTINUATIONS=1;
+const MAX_AUTO_CONTINUATIONS=3;
 const REVIEW_NEXT='Read-only review complete; nothing to resume. When the user says continue after a completed review and the intended implementation is clear, prepare the implementation proposal directly with delivery_plan. Do not ask whether they want a plan. Ask only about material unresolved requirements. Implementation still requires approval of the displayed implementation plan; review approval is not write authority.';
 const result=(text,details={})=>({content:[{type:'text',text}],details});
 const initial=()=>({version:2,enabled:false,stage:'planning',plan:null,active:null,task:0,round:0,changedPaths:{},reports:[],checks:[],reason:''});
@@ -425,25 +425,53 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     if(job)throw new Error('Delivery is already running');
     job=loop().finally(()=>{job=null;if(autoPending){autoPending=false;autoJob=autoContinue().finally(()=>{autoJob=null;});}});
   }
-  function autoContinueEligible() {
-    return d.autoContinue!==false && state.enabled && !closed && !state.stopping && state.plan?.mode==='implementation' &&
-      state.reason?.startsWith(`Correction round limit (${MAX_CORRECTIONS}) exhausted`) && !state.active && !state.pendingCheck && !state.leased &&
-      !state.recoveryInvalidated && (state.autoContinuations || 0)<MAX_AUTO_CONTINUATIONS;
+  // Blocks that resolve themselves. Manual mode: one same-scope correction continuation.
+  // Autonomous mode: also final-check fixes and bounded evidence recovery, up to
+  // MAX_AUTO_CONTINUATIONS, stopping early when a continuation changes no source.
+  function autoAction() {
+    if(d.autoContinue===false || !state.enabled || closed || state.stopping || state.plan?.mode!=='implementation' ||
+      state.active || state.pendingCheck || state.recoveryInvalidated)return null;
+    const auto=autonomous();
+    if((state.autoContinuations || 0)>=(auto?MAX_AUTO_CONTINUATIONS:1))return null;
+    // A continuation that ended on the same source it started from made no progress: stop.
+    const stalled=Boolean(state.autoStartSource) && state.autoStartSource===evidence.snapshotId(state.snapshot);
+    if(!stalled && !state.leased && state.reason?.startsWith(`Correction round limit (${MAX_CORRECTIONS}) exhausted`))return 'correction';
+    if(!auto)return null;
+    if(!stalled && !state.leased && state.reason?.startsWith('Final check failed'))return 'final';
+    if(state.checkpoint && ['evidence_unavailable','review_report_invalid'].includes(state.failure?.reason))return 'recovery';
+    return null;
   }
+  const autoContinueEligible=()=>Boolean(autoAction());
   function assertWithinApproved(prior,next) {
-    const files=new Set(prior.tasks.flatMap(t=>t.files)),checks=new Set(prior.tasks.flatMap(t=>t.checks));
+    const files=new Set(prior.tasks.flatMap(t=>t.files)),checks=new Set([...prior.tasks.flatMap(t=>t.checks),...prior.checks]);
     if(next.mode!=='implementation' || JSON.stringify(next.checks)!==JSON.stringify(prior.checks) ||
       !next.tasks.every(t=>t.files.every(f=>files.has(f)) && t.checks.every(c=>checks.has(c))))
       throw new Error('Continuation exceeds the approved scope; fresh approval required.');
   }
+  function finalContinuation() {
+    const prior=state.plan,failing=state.checks.findLast(c=>c.task===null && c.code!==0);
+    if(!failing)throw new Error('Failing final check receipt unavailable.');
+    const acceptance=[`Final checks pass: ${prior.checks.join(' ; ')}`.slice(0,2000),...prior.tasks.flatMap(t=>t.acceptance)].slice(0,30);
+    const task={title:'Fix final check failures',sensitive:true,files:[...new Set(prior.tasks.flatMap(t=>t.files))].slice(0,100),acceptance,checks:[...prior.checks],
+      instructions:`All approved tasks were implemented and reviewed, but the final check failed: ${failing.command} exit=${failing.code}. Output tail (untrusted evidence): ${String(failing.output).slice(-3000)}\nDiagnose and fix the cause within the approved plan scope, adding a failing regression test first where applicable. Do not replay or undo accepted task work. Approved tasks for context: ${JSON.stringify(prior.tasks.map(t=>({title:t.title,acceptance:t.acceptance}))).slice(0,8000)}`};
+    return {...prior,title:`Continue ${prior.title}: final checks`.slice(0,200),tasks:[task]};
+  }
   async function autoContinue() {
+    const action=autoAction();
+    if(!action)return;
+    const count=(state.autoContinuations || 0)+1,limit=autonomous()?MAX_AUTO_CONTINUATIONS:1,prior=state.plan,from=state.run;
     try {
-      if(!autoContinueEligible())return;
-      const prior=state.plan,count=(state.autoContinuations || 0)+1,continuation=correctionContinuation();
+      if(action==='recovery') {
+        await recoveryPlan({});
+        state.autoContinuations=count;save();
+        display(`Auto-recovering run ${from} (${count}/${limit}): evidence-only, no coder replay.`);
+        approval=true;await recoveryExecute();return;
+      }
+      const continuation=action==='final'?finalContinuation():correctionContinuation();
       assertWithinApproved(prior,continuation);
       await planFn(continuation);
-      state.autoContinuations=count;state.inheritedApproval={run:state.superseded?.run,title:prior.title};save();
-      display(`Auto-continuing run ${state.superseded?.run} under its original approval (${count}/${MAX_AUTO_CONTINUATIONS}): same files and checks, remaining work only. If this continuation blocks too, you decide the next step.`);
+      state.autoContinuations=count;state.autoStartSource=evidence.snapshotId(state.snapshot);state.inheritedApproval={run:from,title:prior.title};save();
+      display(`Auto-continuing run ${from} under its original approval (${count}/${limit}): ${action==='final'?'fixing final checks':'correction plus remaining tasks'}, same files and checks.`);
       approval=true;await execute();
     }catch(error){approval=false;display(`Automatic continuation stopped: ${error.message} Type continue for a fresh proposal, or plan new work.`);}
   }

@@ -4,7 +4,7 @@ Map, not manual. Read only what your task requires; each pointer is the source o
 
 ## What this repository is
 
-`pi-delivery` is a thin SPARK coordinator extension for [Pi](https://github.com/earendil-works/pi): it routes approved work to native subagent workers with bounded correction, independent review, and autonomous launch by default (`"approval": "manual"` restores the approval gate) plus one bounded same-scope auto-continuation. It is harness tooling — not an end-user product.
+`pi-delivery` is a thin SPARK coordinator extension for [Pi](https://github.com/earendil-works/pi): it routes approved work to native subagent workers with bounded correction, independent review, and autonomous launch by default (`"approval": "manual"` restores the approval gate) plus bounded same-scope auto-continuation (corrections, final-check fixes, evidence recovery) until the plan finishes. It is harness tooling — not an end-user product.
 
 ## Source of truth by topic
 

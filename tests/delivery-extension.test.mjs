@@ -126,6 +126,27 @@ test('autonomous mode launches a displayed plan without an approval turn',async(
  assert.equal((await h.wait()).stage,'complete');assert.ok(h.calls.some(c=>c.method==='spawn'&&c.params.agent==='delivery-coder'));
  const guidance=h.handlers.before_agent_start().message.content;assert.match(guidance,/Autonomous mode/);
 });
+test('autonomous mode fixes a failing final check without asking',async()=>{
+ let finals=0;const h=harness({checkCode:command=>command==='final' && finals++===0?1:0,overrides:{autoApprove:true,autoContinue:true}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());
+ const s=await settle(h,s=>s?.stage==='complete' && s.autoContinuations===1);
+ assert.match(s.plan.title,/final checks/);assert.deepEqual(s.plan.tasks[0].checks,['final']);assert.deepEqual(s.plan.tasks[0].files,['a']);
+ assert.match(s.plan.tasks[0].instructions,/final check failed: final exit=1/);
+});
+test('autonomous continuation that changes nothing stops instead of looping',async()=>{
+ const h=harness({checkCode:command=>command==='final'?1:0,overrides:{autoApprove:true,autoContinue:true}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());
+ const s=await settle(h,s=>s?.stage==='blocked' && s.autoContinuations===1);await new Promise(r=>setTimeout(r,30));
+ assert.equal(h.state().run,s.run);assert.equal(h.state().stage,'blocked');assert.match(s.reason,/Final check failed/);
+});
+test('autonomous mode keeps continuing while making progress, up to the bound',async()=>{
+ const finding={status:'changes_requested',summary:'Still broken',findings:['high: a:1 still broken']};
+ const snapshot={a:'hash',unrelated:'dirty'};let edits=0;
+ const h=harness({snapshot,readOutcome:active=>{if(active.agent==='delivery-coder'){snapshot.a=`hash-${++edits}`;return approved;}return active.agent==='delivery-reviewer'?finding:approved;},overrides:{autoApprove:true,autoContinue:true}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());
+ const s=await settle(h,s=>s?.stage==='blocked' && s.autoContinuations===3);await new Promise(r=>setTimeout(r,30));
+ assert.equal(h.state().run,s.run);assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,12);
+});
 test('approval manual in delivery.json keeps the explicit approval gate',async()=>{
  const models=['planning','coder','quality','security'];
  const h=harness({overrides:{autoApprove:true,loadConfig:()=>({version:1,approval:'manual',routes:Object.fromEntries(models.map(m=>[m,`test/${m}`])),repos:['/workspace']})}});
