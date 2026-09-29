@@ -106,7 +106,24 @@ test('status distinguishes live same-process host check from closure lost after 
  assert.equal((await h.wait()).stage,'complete');
 });
 test('failed checks stop at the bound without fabricated passing evidence',async()=>{
- const h=harness({checkCode:1});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.ok(s.checks.every(c=>c.code===1));assert.ok(!h.calls.some(c=>c.params?.agent==='delivery-reviewer'));
+ // Coder keeps changing files, so each failure is a new attempt, not a stalled one.
+ const snapshot={a:'hash',unrelated:'dirty'};let edits=0;
+ const h=harness({checkCode:1,snapshot,readOutcome:active=>{if(active.stage==='coder')snapshot.a=`hash-${++edits}`;return approved;}});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.ok(s.checks.every(c=>c.code===1));assert.ok(!h.calls.some(c=>c.params?.agent==='delivery-reviewer'));
+});
+test('unchanged check failure after a no-change correction round is deferred to review, not retried',async()=>{
+ const h=harness({checkCode:command=>command==='task-one'?1:0});await h.start();await h.commands.delivery.handler('on',h.ctx);
+ await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();
+ assert.equal(s.stage,'complete',s.reason);assert.equal(s.round,1);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),['delivery-coder','delivery-coder','delivery-reviewer']);
+ const taskChecks=s.checks.filter(c=>c.command==='task-one');assert.deepEqual(taskChecks.map(c=>[c.round,c.code,Boolean(c.deferredToReview)]),[[0,1,false],[1,1,true]]);
+ const review=h.calls.find(c=>c.params?.agent==='delivery-reviewer').params.task;assert.match(review,/Approve only if the acceptance explicitly permits this exact failure/);
+ assert.match(textOf(await h.invoke('delivery_status')),/deferred to review verdict/);
+});
+test('reviewer rejecting a deferred check failure still ends at the correction bound',async()=>{
+ const finding={status:'changes_requested',summary:'Failure not permitted',findings:['high: t:1 check still fails']};
+ const h=harness({checkCode:command=>command==='task-one'?1:0,reports:[approved,approved,finding,approved,finding]});await h.start();await h.commands.delivery.handler('on',h.ctx);
+ await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();
+ assert.equal(s.stage,'blocked');assert.match(s.reason,/Correction round limit/);assert.equal(s.round,2);assert.ok(!s.checks.some(c=>c.command==='final'));assert.equal(h.calls.filter(c=>c.params?.agent==='delivery-reviewer').length,2);
 });
 test('launch errors retain correlated unknown ownership and prevent duplicates',async()=>{
  const h=harness({spawnError:true});await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();assert.equal(s.stage,'blocked');assert.ok(s.active);
