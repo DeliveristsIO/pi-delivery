@@ -12,7 +12,7 @@ Final-check failures still block with evidence: the coordinator cannot reliably 
 
 Read-only review runs fresh reviewers with native `read`, `grep`, `find`, `ls` tool allowlists. It never runs shell checks or launches fixes. No OS sandbox is claimed.
 
-There is no optimizer, dev/full profile, alternate review policy, automatic Git branch/staging/commit/merge, workspace cleanup, candidate adoption or migration engine. Existing dirty work is allowed; unrelated edits must be preserved. No baseline commit or stash is required.
+There is no optimizer, dev/full profile, alternate review policy, automatic Git branch/push/merge, workspace cleanup, candidate adoption or migration engine. Existing dirty work is allowed; unrelated edits must be preserved. No baseline commit or stash is required. Delivery commits each task after its reviews pass, staging only that task's changed paths so unrelated dirty or staged work stays out; set `"commit": false` in `delivery.json` to disable. It never pushes.
 
 ## Install
 

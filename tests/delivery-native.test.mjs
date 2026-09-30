@@ -71,7 +71,7 @@ test('delivery binds the installed resolveCurrentSessionId identity before spawn
   const ctx={cwd:root,ui:{setStatus(){}},sessionManager:{getBranch:()=>[],getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
   const nativeOwner=resolveCurrentSessionId(ctx.sessionManager);
   const pi={events:{},on:(name,fn)=>handlers[name]=fn,registerTool:tool=>tools[tool.name]=tool,registerCommand:(name,command)=>commands[name]=command,appendEntry:(_type,data)=>saved.push(data),sendMessage(){},getActiveTools:()=>[],setActiveTools(){},setModel:async()=>true};
-  registerDelivery(pi,undefined,{child:false,autoApprove:false,repoRoot:()=>root,loadConfig:()=>({routes:{planning:'fixture/planning',quality:'fixture/quality',security:'fixture/security'}}),snapshot:()=>({}),workingTreeEvidence:()=>'',validateCommands(){},acquireLock:(_root,owner)=>assert.equal(owner.session,sessionId),releaseLock:(_root,owner)=>assert.equal(owner.session,sessionId),readOutcome,pollMs:1,
+  registerDelivery(pi,undefined,{child:false,autoApprove:false,autoCommit:false,repoRoot:()=>root,loadConfig:()=>({routes:{planning:'fixture/planning',quality:'fixture/quality',security:'fixture/security'}}),snapshot:()=>({}),workingTreeEvidence:()=>'',validateCommands(){},acquireLock:(_root,owner)=>assert.equal(owner.session,sessionId),releaseLock:(_root,owner)=>assert.equal(owner.session,sessionId),readOutcome,pollMs:1,
    rpc:async(_events,method,params)=>{
     if(method==='ping')return {capabilities:{asyncSpawn:true,processTerminalProof:{version:1}}};
     if(method==='status')return {fleet:{totalActive:0}};

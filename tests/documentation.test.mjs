@@ -63,7 +63,8 @@ test('skills preserve high-quality planning, security and exact route guidance',
  assert.match(orchestration,/clear instructions.*concrete acceptance.*task-specific executable checks/i);
  assert.match(orchestration,/shallow approvals, fabricated evidence, behavior drift/i);
  assert.match(orchestration,/explicit user instruction to commit\/push is parent-session work/i);
- assert.match(orchestration,/never while Delivery is ON/i);
+ assert.match(orchestration,/commits each task after its reviews pass/i);
+ assert.match(orchestration,/never require `\/delivery off` first/i);
  assert.match(orchestration,/durable-spec requirement/);
  const security=readFileSync(resolve(root,'skills/security-review/SKILL.md'),'utf8');
  assert.match(security,/Threat-model before approving/i);assert.match(security,/exploit preconditions, impact and remediation/i);

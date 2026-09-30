@@ -71,6 +71,17 @@ export function verifyCommand(cwd,command,signal,timeoutMs=120000) {
 function git(root,args) {
   return execFileSync('git',['--no-pager','--no-optional-locks','--no-replace-objects','-c','core.fsmonitor=false','-c','core.untrackedCache=false','-C',root,...args],{encoding:'utf8',timeout:15000,maxBuffer:16*1024*1024,stdio:['ignore','pipe','pipe']});
 }
+// Commit exactly the given repository paths (additions, edits, deletions). Other staged
+// or dirty work stays untouched: `commit -- paths` records only these paths.
+export function commitPaths(root,paths,message) {
+  const safe=paths.filter(p=>typeof p==='string' && p && !isAbsolute(p) && !p.split('/').includes('..') && !p.startsWith('.git/') && p!=='.git');
+  if(!safe.length)return null;
+  const run=(args,options={})=>execFileSync('git',['-C',root,...args],{encoding:'utf8',timeout:120000,maxBuffer:16*1024*1024,stdio:['pipe','pipe','pipe'],...options});
+  run(['add','-A','--',...safe]);
+  if(!run(['diff','--cached','--name-only','-z','--',...safe]).split('\0').some(Boolean))return null;
+  run(['commit','-q','--no-edit','-F','-','--',...safe],{input:message});
+  return run(['rev-parse','HEAD']).trim();
+}
 export function repoRoot(cwd) {return realpathSync(git(cwd,['rev-parse','--show-toplevel']).trim());}
 const hash=value=>createHash('sha256').update(value).digest('hex');
 export function snapshot(root) {

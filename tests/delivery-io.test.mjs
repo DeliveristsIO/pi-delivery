@@ -178,3 +178,16 @@ test('outer tracked descendants do not cause traversal into a newly embedded nes
  assert.throws(()=>assertScope(before,['nested/outer-tracked']),/run delivery in that repository/i);
  assert.doesNotMatch(io.workingTreeEvidence(d),/contents outside coverage|nested\/inner-untracked|nested\/outer-tracked/);
 });
+test('commitPaths commits only the given paths and leaves other dirty or staged work alone',t=>{
+ const d=fixture(t),git=(...args)=>execFileSync('git',['-C',d,...args],{encoding:'utf8'});git('init','-q','-b','main');
+ git('config','user.name','T');git('config','user.email','t@x');
+ for(const f of ['a','gone','other'])writeFileSync(join(d,f),'base\n');git('add','.');git('commit','-qm','base');
+ writeFileSync(join(d,'a'),'task\n');rmSync(join(d,'gone'));writeFileSync(join(d,'new'),'new\n');
+ writeFileSync(join(d,'other'),'user dirty\n');writeFileSync(join(d,'staged'),'user staged\n');git('add','staged');
+ const sha=io.commitPaths(d,['a','gone','new','../escape','/abs','.git/config'],'Task one\n\nReviewed.\n');
+ assert.match(sha,/^[0-9a-f]{40}$/);assert.equal(git('log','-1','--format=%s').trim(),'Task one');
+ assert.deepEqual(git('show','--name-status','--format=','HEAD').trim().split('\n').sort(),['A\tnew','D\tgone','M\ta']);
+ assert.match(git('status','--short'),/ M other/);assert.match(git('status','--short'),/A  staged/);
+ assert.equal(io.commitPaths(d,['a'],'nothing'),null,'no staged change means no empty commit');
+ assert.equal(io.commitPaths(d,[],'nothing'),null);
+});

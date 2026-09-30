@@ -20,7 +20,7 @@ function harness({initialTools=['read','bash','write','subagent'],entries=[],rep
  }};
  const pi={events,on:(k,f)=>handlers[k]=f,registerTool:t=>tools[t.name]=t,registerCommand:(k,c)=>commands[k]=c,appendEntry:(customType,data)=>{saved.push({type:'custom',customType,data:structuredClone(data)});onSave(data);},sendMessage:m=>messages.push(m),getActiveTools:()=>activeTools.length?[...activeTools]:initialTools,setActiveTools:tools=>{activeTools.splice(0,activeTools.length,...tools);},setModel:async(model)=>{modelSets.push(model);return true;}};
  const ctx={cwd:'/workspace',hasUI:true,ui:{setStatus(){},notify(){},confirm:async()=>true,select:async()=>null},sessionManager:{getBranch:()=>saved,getSessionId:()=>sessionId,getSessionFile:()=>sessionFile},modelRegistry:{getAvailable:()=>models}};
- const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},autoContinue:false,autoApprove:false,verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
+ const deps={child:false,readNativeStatus:nativeStatus,loadConfig:()=>({version:1,routes:Object.fromEntries(models.map(m=>[m.id,`test/${m.id}`])),repos:['/workspace']}),repoRoot:()=>'/workspace',snapshot:()=>structuredClone(snapshot),acquireLock:(root,owner)=>onLock('acquire',root,owner),releaseLock:(root,owner)=>{onLock('release',root,owner);if(releaseError)throw new Error("Lock ownership changed");},readOutcome:outcome || (()=>live?null:reports.shift()||approved),workingTreeEvidence:()=> 'dirty diff',validateCommands:()=>{},autoContinue:false,autoApprove:false,autoCommit:false,commitPaths:()=>{throw new Error("unexpected commit");},verifyCommand:async(_r,command)=>({command,code:typeof checkCode==='function'?checkCode(command):checkCode,signal:null,terminated:false,processClosed:true,output:'actual output'}),rpc,pollMs:1};
  if(realLocksRoot){ctx.cwd=realLocksRoot;deps.repoRoot=()=>realLocksRoot;deps.acquireLock=acquireLock;deps.releaseLock=releaseLock;}
  registerDelivery(pi,undefined,{...deps,...overrides});
  const invoke=(name,args={})=>tools[name].execute('call',args,undefined,undefined,ctx);
@@ -146,6 +146,28 @@ test('autonomous mode keeps continuing while making progress, up to the bound',a
  await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());
  const s=await settle(h,s=>s?.stage==='blocked' && s.autoContinuations===3);await new Promise(r=>setTimeout(r,30));
  assert.equal(h.state().run,s.run);assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,12);
+});
+test('each reviewed task is committed with its changed paths before the next task starts',async()=>{
+ const snapshot={a:'hash',unrelated:'dirty'},commits=[];let edits=0;
+ const h=harness({snapshot,readOutcome:active=>{if(active.agent==='delivery-coder')snapshot.a=`hash-${++edits}`;return approved;},overrides:{autoCommit:true,commitPaths:(root,paths,message)=>{commits.push({root,paths,message,task:h.state().task});snapshot['.git/HEAD']=`head-${commits.length}`;return `${commits.length}`.repeat(40);}}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);const p=plan();p.tasks.push({...p.tasks[0],title:'Two'});
+ await h.invoke('delivery_plan',p);await h.input('Approved');await h.invoke('delivery_execute');const s=await h.wait();
+ assert.equal(s.stage,'complete',s.reason);assert.deepEqual(commits.map(c=>[c.task,c.paths]),[[0,['a']],[1,['a']]]);
+ assert.equal(commits[0].root,'/workspace');assert.match(commits[0].message,/^One\n\nInspected source and evidence\n\nDelivery: Bounded change \(task 1\/2/);
+ assert.equal(s.commits.length,2);assert.match(textOf(await h.invoke('delivery_status')),/Committed task 2: 2{12}/);
+});
+test('a failing commit is reported but never blocks the remaining work',async()=>{
+ const snapshot={a:'hash',unrelated:'dirty'};
+ const h=harness({snapshot,readOutcome:active=>{if(active.agent==='delivery-coder')snapshot.a='changed';return approved;},overrides:{autoCommit:true,commitPaths:()=>{throw new Error('Author identity unknown');}}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ const s=await h.wait();assert.equal(s.stage,'complete',s.reason);assert.match(s.commitFailures[0].error,/Author identity unknown/);
+ assert.ok(h.messages.some(m=>/Commit skipped for task 1: Author identity unknown/.test(m.content)));
+});
+test('commit false in delivery.json disables per-task commits',async()=>{
+ const models=['planning','coder','quality','security'];let called=0;
+ const h=harness({overrides:{autoCommit:true,commitPaths:()=>{called++;return 'f'.repeat(40);},loadConfig:()=>({version:1,commit:false,routes:Object.fromEntries(models.map(m=>[m,`test/${m}`])),repos:['/workspace']})}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ assert.equal((await h.wait()).stage,'complete');assert.equal(called,0);
 });
 test('approval manual in delivery.json keeps the explicit approval gate',async()=>{
  const models=['planning','coder','quality','security'];

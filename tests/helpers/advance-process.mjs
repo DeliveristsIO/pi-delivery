@@ -6,7 +6,7 @@ import {terminalProof} from './native-artifacts.mjs';
 const state=JSON.parse(readFileSync(process.argv[2],'utf8')),mode=process.argv[3],saved=[],tools={},handlers={},calls=[];
 const ctx={cwd:state.root,ui:{setStatus(){}},sessionManager:{getBranch:()=>[{type:'custom',customType:'delivery-coordinator-v2',data:state}],getSessionId:()=>state.session,getSessionFile:()=>state.active.nativeSession},modelRegistry:{getAvailable:()=>[{provider:'test',id:'code'},{provider:'test',id:'review'}]}};
 const pi={events:{},on:(n,f)=>handlers[n]=f,registerTool:t=>tools[t.name]=t,registerCommand(){},getActiveTools:()=>[],setActiveTools(){},appendEntry:(_n,s)=>saved.push(s),sendMessage(){}};
-registerDelivery(pi,undefined,{child:false,repoRoot:()=>state.root,snapshot:()=>({}),workingTreeEvidence:()=>'',rpc:async(_e,method,params)=>{
+registerDelivery(pi,undefined,{child:false,autoCommit:false,repoRoot:()=>state.root,snapshot:()=>({}),workingTreeEvidence:()=>'',rpc:async(_e,method,params)=>{
  calls.push(method);
  if(method==='spawn' && (mode==='advance' || mode==='finish' && params.agent==='delivery-reviewer')) {
   const runId=mode==='advance'?'later-coder':'later-reviewer',dir=join(state.root,runId);mkdirSync(dir);
