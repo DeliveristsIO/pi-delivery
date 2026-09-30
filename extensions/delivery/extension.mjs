@@ -18,6 +18,7 @@ const MAX_CORRECTIONS=2;
 const MAX_AUTO_CONTINUATIONS=3;
 const REVIEW_NEXT='Read-only review complete; nothing to resume. When the user says continue after a completed review and the intended implementation is clear, prepare the implementation proposal directly with delivery_plan. Do not ask whether they want a plan. Ask only about material unresolved requirements. Implementation still requires approval of the displayed implementation plan; review approval is not write authority.';
 const result=(text,details={})=>({content:[{type:'text',text}],details});
+const clip=(value,limit)=>{const text=String(value ?? ''),suffix='… [truncated]';return text.length>limit?text.slice(0,limit-suffix.length)+suffix:text;};
 const initial=()=>({version:2,enabled:false,stage:'planning',plan:null,active:null,task:0,round:0,changedPaths:{},reports:[],checks:[],reason:''});
 const id=model=>`${model.provider}/${model.id}`;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -59,7 +60,6 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   const status=()=>`Delivery ${state.enabled?'ON':'OFF'} · ${state.stage}${state.plan?` · task ${state.task+1}/${state.plan.tasks.length}`:''}${state.active?` · native ${state.active.id || 'launch unresolved'}`:''}${state.reason?' · '+state.reason:''}`;
   const unknownLaunchDiagnostic=()=>`Unknown worker identity${state.active?.launchRequestId?` for request ${state.active.launchRequestId}`:''}; native launch correlation and closure evidence required. No replacement, lock release, off or retry authorized without proof. Only delivery_plan may inspect a pinned native prelaunch rejection before proposing remaining work; otherwise it refuses. Repeating stop/resume cannot establish evidence.`;
   function evidenceText() {
-    const clip=(value,limit)=>{const text=String(value ?? ''),suffix='… [truncated]';return text.length>limit?text.slice(0,limit-suffix.length)+suffix:text;};
     const rounds=new Map();
     for(const entry of [...state.reports,...state.checks])if(entry.task!==null)rounds.set(entry.task,Math.max(rounds.get(entry.task) ?? 0,entry.round));
     const latest=entry=>entry.task===null || entry.round===rounds.get(entry.task);
@@ -89,6 +89,32 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       clip(checks.length?checks.join('\n'):'No host checks executed.',5000),
       ...(commitLines.length?[clip(commitLines.join('\n'),2000)]:[]),
       'Full evidence retained in delivery_status details.'].join('\n'),12000);
+  }
+  // The automatic completion notice is a short summary, not the flood of full
+  // per-round reports/check output; that detail remains in delivery_status.
+  function completionSummary() {
+    const taskVerdict=task=>{
+      const entries=state.reports.filter(r=>r.task===task);
+      if(!entries.length)return 'no report';
+      const round=Math.max(...entries.map(r=>r.round));
+      return entries.filter(r=>r.round===round).map(r=>`${r.stage}: ${r.report.status}`).join(', ');
+    };
+    const commits=state.commits || [],commitFailures=state.commitFailures || [];
+    const lines=state.plan.tasks.map((task,i)=>{
+      const commit=commits.find(c=>c.task===i),failure=commitFailures.find(c=>c.task===i);
+      const deferred=state.checks.some(c=>c.task===i && c.deferredToReview);
+      return clip(`${i+1}. ${task.title} \u2014 ${taskVerdict(i)}`+
+        (commit?` \u00b7 committed ${commit.sha.slice(0,12)} (${commit.paths.length} paths)`:failure?` \u00b7 commit skipped: ${failure.error}`:'')+
+        (deferred?' \u00b7 one check deferred to review, see delivery_status':''),400);
+    });
+    if(state.plan.mode==='review')
+      return [`Review complete \u2014 ${state.plan.tasks.length} task(s): ${state.plan.title}`,lines.join('\n'),REVIEW_NEXT,'Full evidence: delivery_status.'].join('\n\n');
+    const finalChecks=state.checks.filter(c=>c.task===null);
+    const checksLine=finalChecks.length?`Final checks: ${finalChecks.map(c=>`${c.command} \u2705`).join('; ')}`:'No final checks configured.';
+    return [`Delivery complete \u2014 ${state.plan.tasks.length}/${state.plan.tasks.length} task(s): ${state.plan.title}`,
+      lines.join('\n'),checksLine,
+      commits.length?'Commits are local only; push explicitly when ready.':'',
+      'Full evidence: delivery_status.'].filter(Boolean).join('\n\n');
   }
   const render=()=>ctx?.ui.setStatus('delivery',legacy?'Delivery OFF · Unsupported legacy journal preserved; inspect native workers before a new session.':status());
   const save=()=>{pi.appendEntry(ENTRY,structuredClone(state));render();};
@@ -259,7 +285,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
           }
           state.stage=final?'complete':browserFor()?'verifier':'quality';save();
         }
-        if(state.stage==='complete') {release();save();display(evidenceText());return;}
+        if(state.stage==='complete') {release();save();display(completionSummary());return;}
         if(!AGENTS[state.stage])throw new Error(`Cannot continue stage ${state.stage}; inspect retained status.`);
         if(!state.active) {
           assertUnchanged(state.snapshot,d.snapshot(root));

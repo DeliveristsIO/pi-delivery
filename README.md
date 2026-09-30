@@ -14,6 +14,8 @@ Read-only review runs fresh reviewers with native `read`, `grep`, `find`, `ls` t
 
 There is no optimizer, dev/full profile, alternate review policy, automatic Git branch/push/merge, workspace cleanup, candidate adoption or migration engine. Existing dirty work is allowed; unrelated edits must be preserved. No baseline commit or stash is required. Delivery commits each task after its reviews pass, staging only that task's changed paths so unrelated dirty or staged work stays out; set `"commit": false` in `delivery.json` to disable. It never pushes.
 
+The completion message is a short per-task summary (verdicts, commit shas, final-check names) so a multi-task run doesn't flood the chat; full per-round reports, findings and command output stay available on request via `delivery_status`.
+
 ## Install
 
 Requires Node.js 24+, Pi, Bash and GNU coreutils. Install the dependencies and link resources:

@@ -355,12 +355,33 @@ async function executePlan(h,p=plan()) {
 }
 test('completed status and terminal text expose actual checks and reviewer evidence',async()=>{
  const h=harness();const p=plan();p.security=true;assert.equal((await executePlan(h,p)).stage,'complete');
- const terminal=h.messages.at(-1).content,status=await h.invoke('delivery_status');await h.commands.delivery.handler('status',h.ctx);
- for(const text of [terminal,textOf(status),h.messages.at(-1).content]) {
+ const terminal=h.messages.at(-1).content;
+ assert.match(terminal,/Delivery complete/);assert.match(terminal,/quality: approved/);assert.match(terminal,/security: approved/);assert.match(terminal,/Final checks: final/);
+ assert.doesNotMatch(terminal,/Inspected source and evidence/);assert.ok(terminal.length<600,`concise terminal text was ${terminal.length} chars`);
+ const status=await h.invoke('delivery_status');await h.commands.delivery.handler('status',h.ctx);
+ for(const text of [textOf(status),h.messages.at(-1).content]) {
   assert.match(text,/task-one.*exit=0/);assert.match(text,/final.*exit=0/);
   assert.match(text,/quality: approved/);assert.match(text,/security: approved/);assert.match(text,/Inspected source and evidence/);
  }
  assert.equal(status.details.checks[0].output,'actual output');assert.equal(status.details.reports.length,3);
+});
+test('completion notice stays concise for a multi-task run with commits, deferring full evidence to delivery_status',async()=>{
+ const snapshot={a:'hash',unrelated:'dirty'};
+ const h=harness({snapshot,readOutcome:active=>{if(active.agent==='delivery-coder')snapshot.a=`hash-${Math.random()}`;return approved;},overrides:{autoCommit:true,commitPaths:()=>'a'.repeat(40)}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);const p=plan();p.tasks.push({...p.tasks[0],title:'Two'});
+ await h.invoke('delivery_plan',p);await h.input('Approved');await h.invoke('delivery_execute');assert.equal((await h.wait()).stage,'complete');
+ const terminal=h.messages.at(-1).content;
+ assert.match(terminal,/1\. One .* committed a{12}/);assert.match(terminal,/2\. Two .* committed a{12}/);
+ assert.match(terminal,/Commits are local only; push explicitly when ready/);assert.match(terminal,/Full evidence: delivery_status/);
+ assert.ok(terminal.length<800,`concise terminal text was ${terminal.length} chars`);
+});
+test('review-mode completion notice is concise and points to implementation next step',async()=>{
+ const h=harness();const p=plan();p.mode='review';p.tasks[0].checks=[];p.checks=[];
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',p);await h.input('Approved');await h.invoke('delivery_execute');
+ assert.equal((await h.wait()).stage,'complete');
+ const terminal=h.messages.at(-1).content;
+ assert.match(terminal,/Review complete/);assert.match(terminal,/quality: approved/);assert.match(terminal,/prepare the implementation proposal directly with delivery_plan/i);
+ assert.doesNotMatch(terminal,/Inspected source and evidence/);
 });
 test('read-only findings are visible in status and blocked messages without a writer',async()=>{
  const finding={status:'changes_requested',summary:'Parser accepts unsafe input',findings:['high: a:17 reject the unsafe input']};
@@ -382,8 +403,9 @@ test('exhausted correction text reports latest findings rather than superseded r
 test('corrected completion text does not present old findings or failed checks as current blockers',async()=>{
  const finding={status:'changes_requested',summary:'Earlier failed review',findings:['high: a:1 superseded defect']};
  const h=harness({reports:[approved,finding,approved,approved]});assert.equal((await executePlan(h)).stage,'complete');
- const status=await h.invoke('delivery_status');
- for(const text of [h.messages.at(-1).content,textOf(status)]) {
+ assert.match(h.messages.at(-1).content,/quality: approved/);assert.doesNotMatch(h.messages.at(-1).content,/superseded defect|Earlier failed review|changes_requested/);
+ const status=await h.invoke('delivery_status');await h.commands.delivery.handler('status',h.ctx);
+ for(const text of [textOf(status),h.messages.at(-1).content]) {
   assert.match(text,/quality: approved/);assert.match(text,/task-one.*exit=0/);assert.doesNotMatch(text,/superseded defect|Earlier failed review|changes_requested/);
  }
  assert.equal(status.details.reports[1].report.findings[0],'high: a:1 superseded defect');
