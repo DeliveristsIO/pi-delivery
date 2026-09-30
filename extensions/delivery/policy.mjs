@@ -79,8 +79,8 @@ export function validateRoutes(routes,available,roles=ROLES) {
 }
 // Flexible approval: every word must be affirmative vocabulary (typos tolerated),
 // so questions, negations, conditions and unrelated sentences still never launch.
-const APPROVAL_CORE=['approval','approved','approve','yes','yep','yeah','yup','ya','yea','y','sure','ok','okay','k','kk','alright','right','correct','proceed','continue','carry','implement','execute','go','ahead','lgtm','ship','launch','run','start','confirm','confirmed','accept','accepted','agree','agreed','do','good','great','perfect','fine','cool','nice','awesome','excellent','sounds','works','done','absolutely','definitely','certainly','indeed','👍','✅','👌','🚀','💯'];
-const APPROVAL_FILLER=['i','the','this','that','it','displayed','unchanged','plan','please','pls','plz','lets','let\'s','now','and','all','looks','thanks','thank','you','ty','for','with','on','with','me','to','by','very','so','then','just','totally','really','yes','go'];
+const APPROVAL_CORE=['approval','approved','approve','yes','yep','yeah','yup','ya','yea','y','sure','ok','okay','k','kk','alright','right','correct','proceed','continue','carry','implement','execute','go','ahead','lgtm','ship','launch','run','start','confirm','confirmed','accept','accepted','agree','agreed','do','good','great','perfect','fine','cool','nice','awesome','excellent','sounds','works','done','ready','green','absolutely','definitely','certainly','indeed','👍','✅','👌','🚀','💯'];
+const APPROVAL_FILLER=['i','the','this','that','it','displayed','unchanged','plan','please','pls','plz','lets','let\'s','now','and','all','looks','thanks','thank','you','ty','for','with','on','me','to','by','very','so','then','just','totally','really','with','thing','light'];
 const editDistance=(a,b)=>{
   const row=Array.from({length:b.length+1},(_,i)=>i);
   for(let i=1;i<=a.length;i++){let prev=row[0];row[0]=i;for(let j=1;j<=b.length;j++){const temp=row[j];row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));prev=temp;}}
