@@ -163,6 +163,14 @@ test('a failing commit is reported but never blocks the remaining work',async()=
  const s=await h.wait();assert.equal(s.stage,'complete',s.reason);assert.match(s.commitFailures[0].error,/Author identity unknown/);
  assert.ok(h.messages.some(m=>/Commit skipped for task 1: Author identity unknown/.test(m.content)));
 });
+test('a task with zero net file changes is reported, not silently skipped',async()=>{
+ const h=harness({overrides:{autoCommit:true,commitPaths:()=>null}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ const s=await h.wait();assert.equal(s.stage,'complete',s.reason);
+ assert.equal(s.commits?.length || 0,0);assert.equal(s.commitFailures?.length,1);assert.match(s.commitFailures[0].error,/nothing to commit/i);
+ assert.ok(h.messages.some(m=>/No commit for task 1 \(One\): nothing to commit/i.test(m.content)));
+ assert.match(h.messages.at(-1).content,/commit skipped: nothing to commit/i);
+});
 test('commit false in delivery.json disables per-task commits',async()=>{
  const models=['planning','coder','quality','security'];let called=0;
  const h=harness({overrides:{autoCommit:true,commitPaths:()=>{called++;return 'f'.repeat(40);},loadConfig:()=>({version:1,commit:false,routes:Object.fromEntries(models.map(m=>[m,`test/${m}`])),repos:['/workspace']})}});

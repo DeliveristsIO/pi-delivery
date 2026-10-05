@@ -482,6 +482,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     try {
       const sha=d.commitPaths(root,paths,message);
       if(sha){(state.commits ??=[]).push({task:state.task,sha,paths});display(`Committed task ${state.task+1} (${task.title}): ${sha.slice(0,12)}`);}
+      else {(state.commitFailures ??=[]).push({task:state.task,error:'Nothing to commit for this task\'s changed paths.'});display(`No commit for task ${state.task+1} (${task.title}): nothing to commit for its changed paths (already committed, or this task's rounds made no net file change).`);}
     }catch(error){(state.commitFailures ??=[]).push({task:state.task,error:String(error.message).slice(0,500)});display(`Commit skipped for task ${state.task+1}: ${String(error.message).slice(0,300)} Work continues; changes stay in the working tree.`);}
     // The commit moves HEAD/index; rebase the snapshot so later stages compare against it.
     state.snapshot=d.snapshot(root);
