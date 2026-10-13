@@ -87,6 +87,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     const next=state.recoveryInvalidated?'Unmanaged handoff invalidated recovery. Files and receipts preserved; a newly approved plan is required for managed work.':!state.enabled?'Delivery is OFF; delivery tools cannot execute. Session tools remain available.':state.pendingCheck?(job && checkController && !closed && !checkController.signal.aborted?`Host check running in this Pi process: ${clip(state.pendingCheck,500)}. Await its receipt; do not replay or approve another plan.`:'Host check closure is unknown. Inspect its process evidence; do not replay checks or approve another plan.'):state.active?.id
       ? `${job?'Monitoring the retained worker.':'Call delivery_resume to observe/reconcile this exact retained worker, without new approval.'} delivery_stop requests cancellation only. If resume blocks, inspect the reported missing evidence; do not repeat approval/status/stop or restart to bypass it.`
       : state.active?unknownLaunchDiagnostic()
+      : hostStageResumable()?`Run paused before its ${state.stage==='checks'?'task':'final'} checks launched (no worker, no check in flight). Call delivery_resume to run the checks and continue; accepted coder/review work is not replayed and no new approval is needed.`
       : state.stage==='complete'?(state.plan?.mode==='review'?REVIEW_NEXT:'Implementation complete; nothing to resume.')
       : state.stage==='awaiting-recovery-approval'?'Recovery proposal displayed; fresh approval then delivery_recovery_execute. No coder replay.'
       : state.stage==='blocked'?(state.reason?.startsWith(`Correction round limit (${MAX_CORRECTIONS}) exhausted`)?'Correction budget exhausted. Exact user input continue displays a fresh scoped proposal against preserved files and latest concrete review finding; no worker launches until new approval. Do not replay accepted coding or treat passing checks as a review verdict.':state.failure?.reason==='recovery_code_defect'?'Recovery found a code defect. Prepare a separately approved scoped correction with delivery_plan; no current-task coder replay or evidence retry.':state.failure?.reason==='capability_unavailable'?'Required browser capability unavailable. Inspect the probe receipt; satisfy the named prerequisite before proposing a newly approved plan. No automatic install or retry.':state.failure?.reason==='infrastructure_or_product_failure' && !state.active && !state.leased && state.checkpoint && /^Native worker \S+ failed: Missing structured_output call;/.test(state.reason)?'Closed reviewer failed to call structured_output; prose is not a verdict. Exact input continue inspects native closure, source, lock and accepted receipts, then displays a bounded fresh-review proposal only if verified. No coder/check replay or launch without new approval.':state.checkpoint && ['evidence_unavailable','review_report_invalid'].includes(state.failure?.reason)?((state.recoveryAttempts || []).some(a=>a.task===state.task && a.source===evidence.snapshotId(state.snapshot) && a.count>=1)?'Evidence recovery attempt limit exhausted. Evidence preserved; inspect failure. No retry or resume.':'Closed evidence block: call delivery_recovery_plan to inspect eligibility and display bounded recovery. Fresh approval required; do not resume or cycle OFF/ON.'):'No automatic recovery. For user-requested continuation, inspect current source and call delivery_plan with remaining work and revised acceptance. Missing recovery metadata does not forbid a fresh proposal; ownership must settle and execution requires new approval.'):'';
@@ -564,10 +565,22 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     }catch(error){state.reason=`Stop not confirmed: ${error.message} Inspect evidence; delivery_resume only observes the retained worker.`;save();throw new Error(state.reason);}
     return result(evidenceText(),structuredClone(state));
   }
+  const hostStageResumable=()=>['checks','final-checks'].includes(state.stage) && !state.active && !state.pendingCheck && !state.stopping && Boolean(state.run) && state.plan?.mode==='implementation';
   async function resume() {
     guard();if(preparing)throw new Error('Delivery ownership operation is already in progress');
     if(job)return result('Already monitoring the exact retained worker; use delivery_status for evidence.');
     if(state.stage==='complete' && !state.active && !state.pendingCheck)return result(evidenceText(),structuredClone(state));
+    // Host-only stage with no worker and no check in flight: the run stopped
+    // (restart) between an accepted coder/review and its first host check.
+    // Nothing accepted is replayed; checks start from zero for this round.
+    if(hostStageResumable()) {
+      try {
+        assertUnchanged(state.snapshot,d.snapshot(root));
+        state.lockFence=d.acquireLock(root,owner(),{hostStage:state.stage});state.leased=true;state.reason='';closed=false;save();start();
+      }catch(error){state.stage='blocked';state.reason=error.message;save();throw error;}
+      return result(evidenceText(),structuredClone(state));
+    }
+    if(['checks','final-checks'].includes(state.stage) && !state.active && state.pendingCheck)throw new Error(`Host check closure is pending: ${clip(state.pendingCheck,300)}. Its process evidence is unknown after the restart; do not replay it or replan. Inspect what that command did (partial output, side effects), then settle it before resuming.`);
     if(!state.active?.id)throw new Error(state.active?unknownLaunchDiagnostic():state.checkpoint && !state.pendingCheck && ['evidence_unavailable','review_report_invalid'].includes(state.failure?.reason)?'No retained worker to resume. Call delivery_recovery_plan for separately approved bounded recovery.':'Resume only monitors a known native worker. No known worker: inspect unknown launches/checks; do not repeat resume. For a settled run, user-requested continuation can use delivery_plan with remaining work and revised acceptance, followed by fresh approval; no automatic retry.');
     try {
       const active=bindActiveNativeSession(false);

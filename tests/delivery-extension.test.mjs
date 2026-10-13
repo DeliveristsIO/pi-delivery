@@ -642,6 +642,34 @@ test('blocked guidance points continue to model-callable observation without app
  assert.match(textOf(response),/delivery_resume/);assert.equal(h.calls.filter(c=>c.method==='stop').length,1);
  await h.handlers.session_shutdown();
 });
+for(const stage of ['checks','final-checks'])test(`full restart at host-only ${stage} stage resumes from the accepted coder without replaying it (real lock, dead owner)`,async t=>{
+ const {spawnSync}=await import('node:child_process'),{readFileSync,readdirSync}=await import('node:fs');
+ const root=mkdtempSync(join(tmpdir(),'delivery-host-resume-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const oldEnv=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=join(root,'agent');t.after(()=>{if(oldEnv===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=oldEnv;});
+ const snapshot={a:'coded',unrelated:'dirty'};
+ const p=plan();if(stage==='final-checks')p.tasks[0].checks=[];
+ const retained={version:2,enabled:true,root,session:'session',run:'host-run',stage,plan:p,routes:{planning:'test/planning',coder:'test/coder',quality:'test/quality',security:'test/security'},task:0,round:0,active:null,pendingCheck:null,leased:true,snapshot,changedPaths:{0:['a']},reports:[{task:0,round:0,stage:'coder',native:{id:'accepted-coder'},report:approved},...(stage==='final-checks'?[{task:0,round:0,stage:'quality',native:{id:'accepted-review'},report:approved}]:[])],checks:[],reason:'',recoveryVersion:1,evidenceReceipts:[],recoveryAttempts:[]};
+ const dead=Number(spawnSync(process.execPath,['-e','console.log(process.pid)'],{encoding:'utf8'}).stdout.trim());
+ const oldOwner={session:'session',run:'host-run',pid:dead};
+ acquireLock(root,oldOwner);
+ const lock=join(process.env.PI_CODING_AGENT_DIR,'delivery-locks',readdirSync(join(process.env.PI_CODING_AGENT_DIR,'delivery-locks')).find(n=>n.endsWith('.json')));
+ writeFileSync(lock,JSON.stringify(oldOwner));
+ const h=harness({entries:[{type:'custom',customType:'delivery-coordinator-v2',data:retained}],snapshot,realLocksRoot:root});await h.start();
+ assert.match(textOf(await h.invoke('delivery_status')),/delivery_resume/);
+ await h.invoke('delivery_resume');const s=await h.wait();
+ assert.equal(s.stage,'complete',s.reason);assert.equal(s.leased,false);assert.throws(()=>readFileSync(lock),/ENOENT/);
+ assert.equal(h.calls.filter(c=>c.method==='spawn'&&c.params.agent==='delivery-coder').length,0,'accepted coder must not be replayed');
+ assert.deepEqual(s.checks.map(c=>c.command),stage==='checks'?['task-one','final']:['final']);
+ assert.equal(s.reports[0].native.id,'accepted-coder');
+});
+test('host-stage resume refuses a pending check and a changed workspace without touching the lock',async t=>{
+ const base=()=>({version:2,enabled:true,root:'/workspace',session:'session',run:'host-run',stage:'checks',plan:plan(),routes:{planning:'test/planning',coder:'test/coder',quality:'test/quality',security:'test/security'},task:0,round:0,active:null,pendingCheck:null,leased:true,snapshot:{a:'coded',unrelated:'dirty'},changedPaths:{0:['a']},reports:[{task:0,round:0,stage:'coder',native:{id:'accepted-coder'},report:approved}],checks:[],reason:'',recoveryVersion:1,evidenceReceipts:[],recoveryAttempts:[]});
+ let locks=0;
+ const pending=harness({entries:[{type:'custom',customType:'delivery-coordinator-v2',data:{...base(),pendingCheck:'task-one'}}],snapshot:{a:'coded',unrelated:'dirty'},onLock:()=>{locks++;}});await pending.start();
+ await assert.rejects(pending.invoke('delivery_resume'),/pending|closure/i);assert.equal(locks,0);assert.equal(pending.calls.filter(c=>c.method==='spawn').length,0);
+ const drifted=harness({entries:[{type:'custom',customType:'delivery-coordinator-v2',data:base()}],snapshot:{a:'edited-after-restart',unrelated:'dirty'},onLock:()=>{locks++;}});await drifted.start();
+ await assert.rejects(drifted.invoke('delivery_resume'),/Workspace changed/);assert.equal(locks,0);assert.equal(drifted.calls.filter(c=>c.method==='spawn').length,0);
+});
 for(const outcome of ['complete','failed','stopped','stop requested','missing proof','live owner','pending check'])test(`full restart retained reviewer: ${outcome}, real filesystem lock, no accepted work replay`,async t=>{
  const {spawnSync}=await import('node:child_process'),{readFileSync,readdirSync}=await import('node:fs');
  const {native,retained,entries}=await retainedNativeWorker(t,{old:true});

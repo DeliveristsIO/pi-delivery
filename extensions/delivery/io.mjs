@@ -149,7 +149,7 @@ function withLockGuard(path,operation) {
   catch(error){if(error.code==='EEXIST')throw new Error(`Lock operation guard exists; ownership/operation closure unknown. Inspect ${guard}; no automatic removal.`);throw error;}
   try {return operation();}finally{unlinkSync(guard);}
 }
-export function acquireLock(root,owner,{active,pendingCheck,rejectedLaunch}={}) {
+export function acquireLock(root,owner,{active,pendingCheck,rejectedLaunch,hostStage}={}) {
   const path=lockPath(root);let retained;
   const diagnostic=error=>new Error(`Workspace delivery lock owned/stored ${ownerText(retained)}; current ${ownerText(owner)}. ${error.message} Inspect exact retained native evidence; no force unlock or replacement. Lock: ${path}`);
   function inspect() {
@@ -166,6 +166,13 @@ export function acquireLock(root,owner,{active,pendingCheck,rejectedLaunch}={}) 
       const {active:reservation,reason,proof}=rejectedLaunch;
       if(reservation?.session!==owner.session || JSON.stringify(proveNativePrelaunch(reservation,reason))!==JSON.stringify(proof))
         throw new Error('Native prelaunch refusal binding is unverified.');
+      return;
+    }
+    // A host-only stage (checks/final-checks) has no native worker to prove closed:
+    // the dead same-session/run owner above, no pending check, and the caller's
+    // unchanged-snapshot assertion are the whole closure evidence.
+    if(hostStage) {
+      if(!['checks','final-checks'].includes(hostStage))throw new Error(`Not a host-only stage: ${hostStage}.`);
       return;
     }
     if(!active || active.session!==owner.session)throw new Error('Known retained native worker/session evidence is required.');
