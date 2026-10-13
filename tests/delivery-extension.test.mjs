@@ -171,6 +171,21 @@ test('a task with zero net file changes is reported, not silently skipped',async
  assert.ok(h.messages.some(m=>/No commit for task 1 \(One\): nothing to commit/i.test(m.content)));
  assert.match(h.messages.at(-1).content,/commit skipped: nothing to commit/i);
 });
+test('timeouts.commandMs in delivery.json sets the host check timeout; default is 120000',async()=>{
+ const models=['planning','coder','quality','security'],seen=[];
+ const base=()=>({version:1,routes:Object.fromEntries(models.map(m=>[m,`test/${m}`])),repos:['/workspace']});
+ const run=async(config)=>{
+  seen.length=0;
+  const h=harness({overrides:{loadConfig:()=>config,verifyCommand:async(_r,command,_s,timeoutMs)=>{seen.push(timeoutMs);return {command,code:0,signal:null,terminated:false,processClosed:true,output:'ok'};}}});
+  await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());
+  const proposal=h.messages.at(-1).content;await h.input('Approved');await h.invoke('delivery_execute');assert.equal((await h.wait()).stage,'complete');
+  return proposal;
+ };
+ assert.match(await run(base()),/"checksTimeoutMs": 120000/);assert.deepEqual([...new Set(seen)],[120000]);
+ assert.match(await run({...base(),timeouts:{commandMs:900000}}),/"checksTimeoutMs": 900000/);assert.deepEqual([...new Set(seen)],[900000]);
+ const h=harness({overrides:{loadConfig:()=>({...base(),timeouts:{commandMs:'15m'}})}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await assert.rejects(h.invoke('delivery_plan',plan()),/timeouts\.commandMs/);
+});
 test('commit false in delivery.json disables per-task commits',async()=>{
  const models=['planning','coder','quality','security'];let called=0;
  const h=harness({overrides:{autoCommit:true,commitPaths:()=>{called++;return 'f'.repeat(40);},loadConfig:()=>({version:1,commit:false,routes:Object.fromEntries(models.map(m=>[m,`test/${m}`])),repos:['/workspace']})}});

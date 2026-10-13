@@ -32,6 +32,14 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   // Autonomous by default: a displayed plan/recovery launches without an approval turn.
   // Set "approval": "manual" in delivery.json to require explicit user approval again.
   const autonomous=()=>{try{return d.autoApprove!==false && config().approval!=='manual';}catch{return false;}};
+  // Host check timeout: delivery.json timeouts.commandMs (integer ms, 1s..1h), default 120000.
+  // This is the only timeout setting that operates; nothing else in "timeouts" does.
+  function checksTimeoutMs() {
+    const value=config().timeouts?.commandMs;
+    if(value===undefined)return 120000;
+    if(!Number.isSafeInteger(value) || value<1000 || value>3600000)throw new Error(`delivery.json timeouts.commandMs must be an integer of milliseconds between 1000 and 3600000; got ${JSON.stringify(value)}.`);
+    return value;
+  }
   async function launchIfAutonomous(response,launch) {
     if(!autonomous())return response;
     approval=true;
@@ -256,7 +264,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       if(closed || state.stopping)return false;
       assertUnchanged(state.snapshot,d.snapshot(root));
       state.pendingCheck=command;save();checkController=new AbortController();
-      const receipt=await d.verifyCommand(root,command,checkController.signal,120000);
+      const receipt=await d.verifyCommand(root,command,checkController.signal,checksTimeoutMs());
       if(!receipt.processClosed)throw new Error('Check process closure is unknown; do not replay it.');
       state.pendingCheck=null;state.checks.push({...receipt,task:final?null:state.task,round:state.round});save();
       assertUnchanged(state.snapshot,d.snapshot(root));
@@ -609,7 +617,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       } else if(state.leased)throw new Error('Retained workspace ownership must settle before a new plan.');
       state={...initial(),...(superseded?{superseded}:{}),toolsBefore:[...toolsBefore],enabled:true,stage:'awaiting-approval',plan,routes,root,session:ctx.sessionManager.getSessionId(),run:randomUUID(),snapshot,baselineEvidence:d.workingTreeEvidence(root,snapshot),recoveryVersion:1,evidenceReceipts:[],recoveryAttempts:[],probeTasks:plan.tasks.flatMap((t,i)=>t.browser?[i]:[]),probeIndex:0};state.evidenceRoot=d.evidenceRoot(state.run);approval=false;save();
       if(superseded)display(`Fresh continuation proposal replaces run ${superseded.run}. Old reports/checks remain in session history, not inherited approvals. Existing files are the new baseline; only displayed tasks execute. Review changed acceptance/checks, including omitted browser verification; omissions are not passing evidence. Previous plan: ${JSON.stringify(superseded.previousPlan)}`);
-      display(`${JSON.stringify({plan,routes,verifierRoute:plan.tasks.some(t=>t.browser)?routes.coder:undefined,evidenceRoot:plan.tasks.some(t=>t.browser)?state.evidenceRoot:undefined,correctionRounds:MAX_CORRECTIONS,checksTimeoutMs:120000},null,2)}\n${snapshotCoverage(snapshot)}\nTask files are starting points, not a permission list; directly necessary repository edits reuse this approval. Implementation binds the configured security route for newly discovered sensitive paths. Commands run with your account permissions. Each task is committed after its reviews pass (only its changed paths; "commit": false in delivery.json disables). No push, cleanup or branch changes. Existing dirty work is preserved; ignored files are outside snapshot coverage. Reply Approved or Implement the displayed plan to approve this unchanged proposal.`);return result('Plan displayed; awaiting approval.');
+      display(`${JSON.stringify({plan,routes,verifierRoute:plan.tasks.some(t=>t.browser)?routes.coder:undefined,evidenceRoot:plan.tasks.some(t=>t.browser)?state.evidenceRoot:undefined,correctionRounds:MAX_CORRECTIONS,checksTimeoutMs:checksTimeoutMs()},null,2)}\n${snapshotCoverage(snapshot)}\nTask files are starting points, not a permission list; directly necessary repository edits reuse this approval. Implementation binds the configured security route for newly discovered sensitive paths. Commands run with your account permissions. Each task is committed after its reviews pass (only its changed paths; "commit": false in delivery.json disables). No push, cleanup or branch changes. Existing dirty work is preserved; ignored files are outside snapshot coverage. Reply Approved or Implement the displayed plan to approve this unchanged proposal.`);return result('Plan displayed; awaiting approval.');
     }],
     ['recovery_plan','Inspect and display bounded recovery for a closed evidence/report block. Never launches.',recoveryPlan],
     ['recovery_execute','Execute only a separately displayed unchanged recovery proposal after fresh approval.',recoveryExecute],
