@@ -6,7 +6,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {ROLES,AGENTS,SCHEMAS,REPORT_SCHEMA,VERIFIER_REPORT_SCHEMA,validateBrowser,validate,validatePlan,validateReport,validateRoutes,isApproval,assertUnchanged,assertCoderChanges,assertScope,securitySensitive,snapshotCoverage} from './policy.mjs';
 import * as io from './io.mjs';
 import {rpc} from './rpc.mjs';
-import {modelLabel,ROLE_HELP} from './setup.mjs';
+import {modelLabel,ROLE_HELP,commandTimeout,configurationReport} from './setup.mjs';
 import {readIssues} from './issues.mjs';
 
 const ENTRY='delivery-coordinator-v2';
@@ -34,12 +34,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
   const autonomous=()=>{try{return d.autoApprove!==false && config().approval!=='manual';}catch{return false;}};
   // Host check timeout: delivery.json timeouts.commandMs (integer ms, 1s..1h), default 120000.
   // This is the only timeout setting that operates; nothing else in "timeouts" does.
-  function checksTimeoutMs() {
-    const value=config().timeouts?.commandMs;
-    if(value===undefined)return 120000;
-    if(!Number.isSafeInteger(value) || value<1000 || value>3600000)throw new Error(`delivery.json timeouts.commandMs must be an integer of milliseconds between 1000 and 3600000; got ${JSON.stringify(value)}.`);
-    return value;
-  }
+  const checksTimeoutMs=()=>commandTimeout(config());
   async function launchIfAutonomous(response,launch) {
     if(!autonomous())return response;
     approval=true;
@@ -640,7 +635,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     ['stop','Request cancellation of the exact retained native worker. A request is not proven closure; resume observes closure.',stop],
     ['configure','Inspect exact configured routes, or confirm explicitly chosen changes. Legacy settings are retained.',async args=>{
       guard();const current=config();
-      if(!args.routes)return result(JSON.stringify({routes:current.routes,available:available().map(modelLabel)},null,2));
+      if(!args.routes)return result(JSON.stringify({routes:current.routes,available:available().map(modelLabel),...configurationReport(current)},null,2));
       idle();if(state.stage!=='planning' && state.stage!=='complete' && state.stage!=='stopped')throw new Error('Finish or stop the current proposal/run before changing routes.');
       validateRoutes({...current.routes,...args.routes},available().map(id),Object.keys(args.routes));
       if(!ctx.hasUI || !await ctx.ui.confirm('Delivery model routes',`Send approved context to these exact provider/models?\n${JSON.stringify(args.routes)}`))throw new Error('Route changes require native confirmation.');

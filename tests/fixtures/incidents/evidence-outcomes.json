@@ -1,0 +1,33 @@
+[
+  {
+    "id": "review-prose-is-not-a-verdict",
+    "provenance": "reconstructed-contract-scenario",
+    "source": "tests/delivery-extension.test.mjs: malformed worker report; agents/delivery-reviewer.md",
+    "description": "A reviewer claims success without the required structured report fields.",
+    "reports": [{"status":"approved","summary":"Task implemented","findings":[]},{"status":"approved"}],
+    "expectedStage": "blocked",
+    "expectedAgents": ["delivery-coder","delivery-reviewer"],
+    "expectedChecks": ["task-one"]
+  },
+  {
+    "id": "green-task-red-final",
+    "provenance": "reconstructed-contract-scenario",
+    "source": "README.md: final-check failures block completion",
+    "description": "Task review passes, but the final check fails; completion must not be claimed.",
+    "reports": [{"status":"approved","summary":"Task implemented","findings":[]},{"status":"approved","summary":"Source and task check inspected","findings":[]}],
+    "finalExit": 1,
+    "expectedStage": "blocked",
+    "expectedAgents": ["delivery-coder","delivery-reviewer"],
+    "expectedChecks": ["task-one","final"]
+  },
+  {
+    "id": "verified-completion-control",
+    "provenance": "synthetic-positive-control",
+    "source": "README.md: checks and independent review precede completion",
+    "description": "Passing task evidence, review, and final checks produce completion.",
+    "reports": [{"status":"approved","summary":"Task implemented","findings":[]},{"status":"approved","summary":"Source and task check inspected","findings":[]}],
+    "expectedStage": "complete",
+    "expectedAgents": ["delivery-coder","delivery-reviewer"],
+    "expectedChecks": ["task-one","final"]
+  }
+]

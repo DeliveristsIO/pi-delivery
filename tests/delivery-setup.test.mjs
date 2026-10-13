@@ -16,3 +16,19 @@ test('versioned IDs stay intact and labels expose registry data without rankings
  assert.doesNotMatch(label,/best|cheapest|qualified/);
  assert.equal(Object.keys(ROLE_HELP).length,5);
 });
+
+test('configuration inspection separates effective defaults from ignored fields without exposing their values',async()=>{
+ const {configurationReport}=await import('../extensions/delivery/setup.mjs');
+ const report=configurationReport({version:1,routes:{planning:'p/plan',spec:'p/old'},repos:['/private'],profiles:{secret:'private'},timeouts:{coder:42}});
+ assert.deepEqual(report.active,{routes:{planning:'p/plan'},approval:'autonomous',commit:true,timeouts:{commandMs:120000}});
+ assert.deepEqual(report.inactiveSettings.map(s=>s.path),['routes.spec','repos','profiles','timeouts.coder']);
+ assert.doesNotMatch(JSON.stringify(report),/private|p\/old/);
+});
+test('configuration inspection reflects active settings and rejects invalid command timeouts',async()=>{
+ const {configurationReport}=await import('../extensions/delivery/setup.mjs');
+ const report=configurationReport({routes:{quality:'p/review'},approval:'manual',commit:false,timeouts:{commandMs:900000}});
+ assert.equal(report.active.approval,'manual');assert.equal(report.active.commit,false);assert.equal(report.active.timeouts.commandMs,900000);
+ for(const value of [0,999,3600001,'900000'])assert.throws(()=>configurationReport({routes:{},timeouts:{commandMs:value}}),/commandMs/);
+ assert.equal(configurationReport({routes:{},approval:'other',commit:'false'}).active.approval,'autonomous');
+ assert.equal(configurationReport({routes:{},commit:'false'}).active.commit,true);
+});

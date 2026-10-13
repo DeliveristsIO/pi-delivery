@@ -943,3 +943,30 @@ for(const scenario of ['closed','recovery ping failure','recovery fleet failure'
  }
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,0,'OFF must not launch or retry work');
 });
+
+const incidentFixtures=JSON.parse(readFileSync(new URL('./fixtures/incidents/evidence-outcomes.json',import.meta.url),'utf8'));
+for(const incident of incidentFixtures)test(`incident replay: ${incident.id}`,async()=>{
+ assert.ok(['reconstructed-contract-scenario','synthetic-positive-control'].includes(incident.provenance));
+ assert.ok(incident.source && incident.description);
+ const h=harness({reports:structuredClone(incident.reports),checkCode:command=>command==='final'?(incident.finalExit || 0):0});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);
+ await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');
+ const state=await h.wait();
+ assert.equal(state.stage,incident.expectedStage,state.reason);
+ assert.deepEqual(h.calls.filter(c=>c.method==='spawn').map(c=>c.params.agent),incident.expectedAgents);
+ assert.deepEqual(state.checks.map(c=>c.command),incident.expectedChecks);
+ const completion=h.messages.filter(m=>/^Delivery complete/.test(m.content));
+ assert.equal(completion.length,incident.expectedStage==='complete'?1:0,'completion must agree with durable outcome');
+ if(incident.finalExit)assert.equal(state.checks.find(c=>c.command==='final').code,incident.finalExit);
+ await h.handlers.session_shutdown();
+});
+
+test('configure inspection returns effective settings and inert paths without changing configuration or launching',async()=>{
+ const config={version:1,routes:{planning:'test/planning',coder:'test/coder',quality:'test/quality',security:'test/security',spec:'test/old'},repos:[],approval:'manual',commit:false,timeouts:{commandMs:900000,reviewer:600000}};
+ const h=harness({overrides:{loadConfig:()=>structuredClone(config),saveConfig:()=>{throw new Error('Inspection must not write');}}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);const response=await h.invoke('delivery_configure');const report=JSON.parse(response.content[0].text);
+ assert.equal(report.active.approval,'manual');assert.equal(report.active.commit,false);assert.equal(report.active.timeouts.commandMs,900000);
+ assert.equal(report.active.routes.spec,undefined);assert.equal(report.routes.spec,'test/old');
+ assert.ok(report.inactiveSettings.some(s=>s.path==='timeouts.reviewer'));
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,0);
+});
