@@ -4,6 +4,10 @@ description: Use when coordinating approved development through the thin deliver
 ---
 # Thin delivery coordination
 
+## Headless sessions
+
+When the Delivery guidance says headless, nobody can answer questions or approve anything. `delivery_plan` (and `delivery_recovery_plan`) launch immediately and the call itself waits until the run settles, then returns the completion summary or the blocking evidence: do not poll, do not call `delivery_execute`, and report that outcome. If Delivery is OFF in a headless session, report that headless mode is not enabled or could not start, with the displayed reason, instead of working around it.
+
 ## Fresh continuation after a settled block
 
 When the user requests continued work but recovery proof is absent or recovery is ineligible, do not loop on resume/recovery or demand nonexistent journal upgrades. Inspect current source and recorded results, then call `delivery_plan` with only remaining work and any explicitly requested acceptance changes. The runtime checks settled ownership, preserves the superseded journal, releases a proven lease and displays a new proposal against current files; it never inherits old approvals. Do not replay completed tasks merely to recreate history. A requested browser-test omission may be proposed explicitly, with child-login/browser behavior marked unverified rather than production-ready. Fresh approval is required before execution. Unknown/live workers, pending checks and unproven locks still block replacement. One narrow exception: `delivery_plan` can validate the exact historical native security-tool-contract rejection against pinned installed prelaunch sources and a fenced stale lock before it displays a fresh plan. A generic RPC error or missing artifact is never enough. This path is new planning, not resumption or automatic retry.

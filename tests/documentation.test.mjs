@@ -129,3 +129,17 @@ test('AGENTS.md stays a bounded map whose referenced sources exist',()=>{
   assert.ok(existsSync(target),`AGENTS.md points at missing source: ${ref}`);
  }
 });
+
+test('headless operation is documented as opt-in, autonomous-only and waiting for the outcome',()=>{
+ const readme=readFileSync(resolve(root,'README.md'),'utf8');
+ assert.match(readme,/"headless": true/);assert.match(readme,/no UI/i);assert.match(readme,/\*\*waits\*\*/);assert.match(readme,/"approval": "manual"/);
+ assert.match(readme,/only the literal `true` enables/i);assert.match(readme,/dedicated, trusted agent directory/i);
+ const config=readFileSync(resolve(root,'docs/configuration.md'),'utf8');
+ assert.match(config,/## Headless operation/);assert.match(config,/literal `true`/);assert.match(config,/Interactive and RPC sessions are unchanged/);
+ assert.match(config,/stays OFF and displays why/i);assert.match(config,/No model is substituted/i);assert.match(config,/`delivery_configure` route changes still require an interactive UI/);assert.match(config,/must still list the delivery tools and `subagent`/);
+ const security=readFileSync(resolve(root,'SECURITY.md'),'utf8');
+ assert.match(security,/Headless mode/);assert.match(security,/removes the approval turn/i);assert.match(security,/not an OS sandbox/i);
+ const skill=readFileSync(resolve(root,'skills/orchestrate-delivery/SKILL.md'),'utf8');
+ assert.match(skill,/## Headless sessions/);assert.match(skill,/do not call `delivery_execute`/i);assert.match(skill,/instead of working around it/i);
+ assert.ok(existsSync(resolve(root,'docs/spark/specs/2026-10-14-headless-operation-design.md')));
+});
