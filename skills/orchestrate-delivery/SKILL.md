@@ -4,6 +4,10 @@ description: Use when coordinating approved development through the thin deliver
 ---
 # Thin delivery coordination
 
+## Lead the current run
+
+Supervise the current approved task and its exact worker. When Delivery sends a supervision turn after a block, call `delivery_status`, inspect the source and receipts, and decide whether the existing bounded correction or evidence recovery is eligible. Verify native closure before any replacement; unknown identity remains blocked. Report an unresolved blocker with its evidence. Do not choose a new issue, duplicate the task, silently enlarge the plan or treat the supervision notice as approval. The extension compacts the parent context above 35%; after compaction use the retained journal and current source as authority, with the handoff summary as a pointer.
+
 ## Headless sessions
 
 When the Delivery guidance says headless, nobody can answer questions or approve anything. `delivery_plan` (and `delivery_recovery_plan`) launch immediately and the call itself waits until the run settles, then returns the completion summary or the blocking evidence: do not poll, do not call `delivery_execute`, and report that outcome. If Delivery is OFF in a headless session, report that headless mode is not enabled or could not start, with the displayed reason, instead of working around it.

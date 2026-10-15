@@ -16,6 +16,12 @@ There is no optimizer, dev/full profile, alternate review policy, automatic Git 
 
 The completion message is a short per-task summary (verdicts, commit shas, final-check names) so a multi-task run doesn't flood the chat; full per-round reports, findings and command output stay available on request via `delivery_status`.
 
+## Leader supervision and context
+
+The parent Pi agent leads only the current approved Delivery run. Native coder, verifier and independent reviewer workers handle their assigned stages; the extension persists their exact identity and checks closure before advancing. When an interactive run blocks after its bounded automatic actions, Delivery queues one leader turn for that particular blocker. The leader inspects `delivery_status`, source and receipts, then follows the existing correction, recovery or stop rules. The notice never selects a new issue or launches a replacement worker by itself. Headless planning already waits for the settled outcome, so it returns blocking evidence to its caller instead of queuing another turn.
+
+While Delivery is ON, parent context above 35% triggers Pi compaction at a turn boundary. A short handoff identifies the current run, task, stage and worker; the persisted Delivery journal and source remain authoritative. Another trigger is armed only after usage falls to 30% or below, preventing repeated compaction when the summary remains large. Native workers already start with fresh context. This does not transfer live work to a new Pi session.
+
 ## Install
 
 Requires Node.js 24+, Pi, Bash and GNU coreutils. Install the dependencies and link resources:

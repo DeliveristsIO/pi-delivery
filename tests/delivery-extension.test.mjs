@@ -409,7 +409,7 @@ test('review-mode completion notice is concise and points to implementation next
 test('read-only findings are visible in status and blocked messages without a writer',async()=>{
  const finding={status:'changes_requested',summary:'Parser accepts unsafe input',findings:['high: a:17 reject the unsafe input']};
  const h=harness({reports:[finding]}),p=plan();p.mode='review';p.tasks[0].checks=[];p.checks=[];assert.equal((await executePlan(h,p)).stage,'blocked');
- const terminal=h.messages.at(-1).content,status=await h.invoke('delivery_status');await h.commands.delivery.handler('status',h.ctx);
+ const terminal=h.messages.findLast(m=>m.customType==='delivery').content,status=await h.invoke('delivery_status');await h.commands.delivery.handler('status',h.ctx);
  for(const text of [terminal,textOf(status),h.messages.at(-1).content]) {
   assert.match(text,/quality: changes_requested/);assert.match(text,/Parser accepts unsafe input/);assert.match(text,/high: a:17 reject the unsafe input/);assert.match(text,/No host checks executed/);
  }
@@ -418,7 +418,7 @@ test('read-only findings are visible in status and blocked messages without a wr
 test('exhausted correction text reports latest findings rather than superseded rounds',async()=>{
  const finding=n=>({status:'changes_requested',summary:`Review round ${n}`,findings:[`high: a:${n} remaining defect ${n}`]});
  const h=harness({reports:[approved,finding(1),approved,finding(2),approved,finding(3)]});assert.equal((await executePlan(h)).stage,'blocked');
- for(const text of [h.messages.at(-1).content,textOf(await h.invoke('delivery_status'))]) {
+ for(const text of [h.messages.findLast(m=>m.customType==='delivery').content,textOf(await h.invoke('delivery_status'))]) {
   assert.match(text,/Correction round limit/);assert.match(text,/Review round 3/);assert.match(text,/a:3 remaining defect 3/);assert.match(text,/task-one.*exit=0/);
   assert.doesNotMatch(text,/remaining defect [12]/);
  }
