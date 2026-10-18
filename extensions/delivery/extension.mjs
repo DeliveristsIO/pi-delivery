@@ -712,7 +712,10 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     }
     return {action:'continue'};
   });
-  pi.on('turn_end',(_event,context)=>{
+  // Pi's ctx.compact() aborts the active agent run first, so compacting at
+  // turn_end killed the leader mid-answer ("The operation was aborted").
+  // Compact only once the run has settled and Pi will not continue on its own.
+  pi.on('agent_settled',(_event,context)=>{
     if(!state.enabled || legacy || closed || compactionPending)return;
     const percent=context.getContextUsage?.()?.percent;
     if(typeof percent!=='number' || !Number.isFinite(percent))return;

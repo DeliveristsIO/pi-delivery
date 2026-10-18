@@ -106,26 +106,31 @@ test('headless guidance tells the coordinator that planning waits for the outcom
 test('leader context compacts above 35 percent and carries current run identity',async()=>{
  const h=harness({hasUI:true});await h.start();await h.commands.delivery.handler('on',h.ctx);
  await h.invoke('delivery_plan',plan());await h.wait();
- h.setContextPercent(35);h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,0);
- h.setContextPercent(35.1);h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,1);
+ h.setContextPercent(35);h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,0);
+ h.setContextPercent(35.1);h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,1);
  assert.match(h.compactions[0].customInstructions,/Current Delivery run/);
  assert.match(h.compactions[0].customInstructions,/Do not select a new issue or duplicate this task/);
- h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,1);
- h.compactions[0].onComplete();h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,1);
- h.setContextPercent(29);h.handlers.turn_end({},h.ctx);
- h.setContextPercent(36);h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,2);
+ h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,1);
+ h.compactions[0].onComplete();h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,1);
+ h.setContextPercent(29);h.handlers.agent_settled({},h.ctx);
+ h.setContextPercent(36);h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,2);
 });
 
+test('leader context never compacts mid-run at turn_end because compact aborts the active run',async()=>{
+ const h=harness({hasUI:true});await h.start();await h.commands.delivery.handler('on',h.ctx);h.setContextPercent(90);
+ assert.equal(h.handlers.turn_end,undefined);
+ h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,1);
+});
 test('leader context compaction is inactive while Delivery is OFF or usage unavailable',async()=>{
- const h=harness({hasUI:true});await h.start();h.setContextPercent(80);h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,0);
- await h.commands.delivery.handler('on',h.ctx);h.setContextPercent(null);h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,0);
+ const h=harness({hasUI:true});await h.start();h.setContextPercent(80);h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,0);
+ await h.commands.delivery.handler('on',h.ctx);h.setContextPercent(null);h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,0);
 });
 
 test('old-session compaction callback cannot clear a new session compaction',async()=>{
  const h=harness({hasUI:true});await h.start();await h.commands.delivery.handler('on',h.ctx);
- h.setContextPercent(40);h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,1);
- await h.start();h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,2);
- h.compactions[0].onComplete();h.handlers.turn_end({},h.ctx);assert.equal(h.compactions.length,2);
+ h.setContextPercent(40);h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,1);
+ await h.start();h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,2);
+ h.compactions[0].onComplete();h.handlers.agent_settled({},h.ctx);assert.equal(h.compactions.length,2);
  h.compactions[1].onComplete();
 });
 

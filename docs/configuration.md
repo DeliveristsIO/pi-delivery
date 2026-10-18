@@ -2,7 +2,7 @@
 
 ## Leader context and blocked-run supervision
 
-Delivery compacts the enabled parent session when Pi reports context usage above 35% at `turn_end`. It re-arms after usage falls to 30% or below. This uses Pi's `ctx.compact` and its current compaction settings; no `delivery.json` key changes the threshold. The handoff includes a bounded current-run identity and next-action reminder, while the durable journal supplies exact state after compaction. Compaction failure displays a diagnostic and leaves the run untouched. Worker sessions use fresh context and are not compacted by this parent hook.
+Delivery compacts the enabled parent session when Pi reports context usage above 35% once a run reaches `agent_settled`, never mid-run: `ctx.compact` aborts the active run first, so compacting at `turn_end` killed the leader's answer. It re-arms after usage falls to 30% or below. This uses Pi's `ctx.compact` and its current compaction settings; no `delivery.json` key changes the threshold. The handoff includes a bounded current-run identity and next-action reminder, while the durable journal supplies exact state after compaction. Compaction failure displays a diagnostic and leaves the run untouched. Worker sessions use fresh context and are not compacted by this parent hook.
 
 After an interactive run blocks and no bounded automatic continuation is pending, Delivery queues one model-visible supervision turn for that blocker. The leader inspects the existing run and evidence. The notice itself grants no new scope, approval or worker launch. UI-less runs return the settled result directly to the caller.
 
