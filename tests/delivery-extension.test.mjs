@@ -258,6 +258,21 @@ test('verified prelaunch native refusal permits fresh plan, preserves old receip
  assert.equal(h.calls.filter(c=>c.method==='spawn').length,1);
  await assert.rejects(h.invoke('delivery_execute'),/approval/i);
 });
+test('proven pre-spawn coder launch failure settles as non-launch with coder failure stage',async()=>{
+ const locks=[],seen=[];
+ const h=harness({spawnError:true,onLock:(...args)=>locks.push(args),overrides:{inspectLock:()=>({fence:'retained'}),proveNativePrelaunch:(active,reason)=>{seen.push([active.stage,reason]);return {kind:'native-prelaunch-budget-fs-error',code:'ENOSPC',stage:active.stage};}}});
+ await h.start();await h.commands.delivery.handler('on',h.ctx);await h.invoke('delivery_plan',plan());await h.input('Approved');await h.invoke('delivery_execute');await h.wait();
+ const requestId=h.state().active.launchRequestId;
+ // A later reason overwrite (e.g. unconfirmed stop) must not lose the journaled launch error.
+ h.saved.push({type:'custom',customType:'delivery-coordinator-v2',data:structuredClone(h.state())});h.state().reason='Stop not confirmed: unknown worker';
+ assert.equal(h.state().active.stage,'coder');
+ await h.invoke('delivery_plan',plan());
+ assert.deepEqual(seen.map(([stage])=>stage),['coder']);assert.equal(seen[0][1],`Native launch request ${requestId} failed; worker identity remains unknown. Provider unavailable`);
+ assert.equal(h.state().stage,'awaiting-approval');assert.equal(h.state().active,null);
+ assert.ok(h.saved.some(e=>e.customType==='delivery-coordinator-v2' && e.data.failure?.stage==='coder' && e.data.failure?.reason==='native_prelaunch_rejected' && /ENOSPC/.test(e.data.reason)));
+ assert.equal(h.calls.filter(c=>c.method==='spawn').length,1);
+ await assert.rejects(h.invoke('delivery_execute'),/approval/i);
+});
 test('closed native failed reviewer missing structured tool output gets fresh reviewed recovery without coder replay',async()=>{
  let reviews=0;
  const nativeFailure=active=>{

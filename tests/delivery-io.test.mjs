@@ -101,6 +101,22 @@ test('pinned prelaunch refusal reconciles only exact stale owner lease',{skip:!e
  current.fence=io.acquireLock(repo,current,{rejectedLaunch:{active,reason,proof}});
  io.releaseLock(repo,current);
 });
+test('pinned pre-spawn fan-out budget fs failure reconciles only exact stale owner lease',{skip:!existsSync(join(homedir(),'.pi/agent/npm/node_modules/pi-subagents/src/runs/shared/run-fanout-budget.ts'))},t=>{
+ const d=fixture(t),agentDir=join(d,'agent'),repo=join(d,'repo'),old=process.env.PI_CODING_AGENT_DIR;
+ mkdirSync(join(agentDir,'npm/node_modules'),{recursive:true});mkdirSync(repo);
+ symlinkSync(join(homedir(),'.pi/agent/npm/node_modules/pi-subagents'),join(agentDir,'npm/node_modules/pi-subagents'));
+ process.env.PI_CODING_AGENT_DIR=agentDir;
+ t.after(()=>{if(old===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=old;});
+ const owner={session:'retained',run:'run',pid:2147483647};owner.fence=io.acquireLock(repo,owner);
+ const current={...owner,pid:process.pid};
+ const active={id:null,dir:null,launchRequestId:'req',agent:'delivery-coder',stage:'coder',session:owner.session,nativeSession:'/parent.jsonl',startedAt:Date.now()};
+ const reason="Native launch request req failed; worker identity remains unknown. ENOSPC: no space left on device, mkdir '/tmp/pi-subagents-uid-1000/run-fanout-budgets'";
+ const proof=proveNativePrelaunch(active,reason);
+ assert.throws(()=>io.acquireLock(repo,current,{rejectedLaunch:{active,reason:reason.replace('ENOSPC','EBUSY'),proof}}),/owned|proven/i);
+ assert.throws(()=>io.acquireLock(repo,current,{rejectedLaunch:{active:{...active,launchRequestId:'other'},reason,proof}}),/owned|proven/i);
+ current.fence=io.acquireLock(repo,current,{rejectedLaunch:{active,reason,proof}});
+ io.releaseLock(repo,current);
+});
 test('native partial failure needs terminal proof and cannot masquerade as completion',t=>{
  const d=fixture(t),active={id:'r',dir:d,nativeSession:'s',agent:'delivery-coder',model:'test/code'};
  writeFileSync(join(d,'status.json'),JSON.stringify({runId:'r',sessionId:'s',state:'partial',error:'provider unavailable',steps:[]}));assert.equal(readOutcome(active),null);

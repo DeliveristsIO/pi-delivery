@@ -189,15 +189,19 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     const reasons=ctx.sessionManager.getBranch().filter(entry=>entry.type==='custom' && entry.customType===ENTRY)
       .map(entry=>entry.data).filter(prior=>prior.run===state.run && prior.session===state.session &&
         prior.active?.startedAt===reservation.startedAt && prior.active?.agent===reservation.agent && prior.active?.id===null);
-    const reason=reasons.find(prior=>prior.reason?.startsWith('Run fan-out: '))?.reason || state.reason;
+    const launchFailure=`Native launch request ${reservation.launchRequestId} failed; worker identity remains unknown. `;
+    const reason=reasons.find(prior=>prior.reason?.startsWith('Run fan-out: '))?.reason ||
+      (reservation.launchRequestId && reasons.find(prior=>prior.reason?.startsWith(launchFailure))?.reason) || state.reason;
     if(reservation.session!==state.session || reservation.nativeSession!==nativeOwnerSession())throw new Error(unknownLaunchDiagnostic());
     const proof=d.proveNativePrelaunch(reservation,reason);
     d.inspectLock(root,owner());
     state.lockFence=d.acquireLock(root,owner(),{rejectedLaunch:{active:reservation,reason,proof}});
     // A previous stop request is settled as a non-launch, not a cancellation
     // or permission to reuse the old plan. Persist before releasing the lease.
-    state.active=null;state.stopping=false;state.failure={stage:'security',reason:'native_prelaunch_rejected',proof};
-    state.reason='Exact pinned native prelaunch validation rejected security worker before async runner startup. No security review was completed.';
+    state.active=null;state.stopping=false;state.failure={stage:reservation.stage,reason:'native_prelaunch_rejected',proof};
+    state.reason=proof.kind==='native-prelaunch-budget-fs-error'
+      ?`Exact pinned native prelaunch run fan-out budget creation failed (${proof.code}) before async runner startup. No ${reservation.stage} worker started.`
+      :'Exact pinned native prelaunch validation rejected security worker before async runner startup. No security review was completed.';
     save();release();save();
   }
   function releaseForHandoff() {

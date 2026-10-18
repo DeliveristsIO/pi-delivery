@@ -21,6 +21,37 @@ test('pinned native prelaunch rejection proves only exact historical security er
  assert.throws(()=>proveNativePrelaunch({...active,startedAt:1},reason),/not proven/);
  assert.throws(()=>proveNativePrelaunch({...active,id:'maybe'},reason),/not proven/);
 });
+test('pinned native fan-out budget filesystem failure proves non-launch only for exact wrapped mkdir error',{skip:!existsSync(join(installed,'src/runs/shared/run-fanout-budget.ts'))},()=>{
+ const active={id:null,dir:null,launchRequestId:'req-1',agent:'delivery-coder',stage:'coder',session:'s',nativeSession:'/p.jsonl',startedAt:Date.now()};
+ const prefix='Native launch request req-1 failed; worker identity remains unknown. ';
+ const dir="/tmp/pi-subagents-uid-1000/run-fanout-budgets/6750fe40-0af1-4dee-bb75-6f0102ade00f-071f00bc-d894-4861-8895-d3c8865e2d1a";
+ const reason=`${prefix}ENOSPC: no space left on device, mkdir '${dir}'`;
+ const proof=proveNativePrelaunch(active,reason);
+ assert.equal(proof.kind,'native-prelaunch-budget-fs-error');assert.equal(proof.code,'ENOSPC');assert.equal(proof.path,dir);assert.equal(proof.stage,'coder');
+ assert.equal(proveNativePrelaunch(active,`${prefix}ENOSPC: no space left on device, mkdir '/tmp/x/run-fanout-budgets'`).kind,'native-prelaunch-budget-fs-error');
+ assert.equal(proveNativePrelaunch({...active,agent:'delivery-verifier',stage:'probe'},reason).stage,'probe');
+ // Node reports the requested recursive path; derive that shape from a real failure.
+ const tmp=mkdtempSync(join(tmpdir(),'budget-shape-'));let real;
+ try{writeFileSync(join(tmp,'f'),'');try{mkdirSync(join(tmp,'f','run-fanout-budgets','x-071f00bc-d894-4861-8895-d3c8865e2d1a','claims'),{recursive:true});}catch(error){real=error.message;}}finally{rmSync(tmp,{recursive:true,force:true});}
+ assert.match(real,/^ENOTDIR: .*\/claims'$/);
+ assert.equal(proveNativePrelaunch(active,`${prefix}${real.replace(/^ENOTDIR: not a directory/,'ENOSPC: no space left on device')}`).kind,'native-prelaunch-budget-fs-error');
+ assert.equal(proveNativePrelaunch(active,`${prefix}ENOSPC: no space left on device, mkdir '${dir}/claims'`).path,`${dir}/claims`);
+ for(const bad of [
+  `ENOSPC: no space left on device, mkdir '${dir}'`,
+  `Native launch request other failed; worker identity remains unknown. ENOSPC: no space left on device, mkdir '${dir}'`,
+  `${prefix}ENOSPC: no space left on device, mkdir '${dir}/admission.lock'`,
+  `${prefix}ENOSPC: no space left on device, mkdir '${dir}/claims/x'`,
+  `${prefix}ENOSPC: no space left on device, open '${dir}/manifest.json'`,
+  `${prefix}ENOSPC: no space left on device, mkdir '/tmp/async-subagent-runs/x'`,
+  `${prefix}Failed to create async run directory '/tmp/x': ENOSPC: no space left on device, mkdir '${dir}'`,
+  `${prefix}pi-subagents spawn timed out. Check installation/status; do not retry a launch blindly.`,
+  `${prefix}ENOSPC: no space left on device, mkdir '${dir}'\nextra`
+ ])assert.throws(()=>proveNativePrelaunch(active,bad),/not proven/,bad);
+ assert.throws(()=>proveNativePrelaunch({...active,agent:'delivery-coder',stage:'quality'},reason),/not proven/);
+ assert.throws(()=>proveNativePrelaunch({...active,id:'maybe'},reason),/not proven/);
+ assert.throws(()=>proveNativePrelaunch({...active,launchRequestId:undefined},reason),/not proven/);
+ assert.throws(()=>proveNativePrelaunch({...active,startedAt:1},reason),/chronology/);
+});
 test('RPC preserves launch correlation and native error code without claiming non-launch',async()=>{
  const listeners=new Map(),events={on:(key,fn)=>{listeners.set(key,fn);return()=>listeners.delete(key);},emit:(key,request)=>{
   assert.equal(request.requestId,'reserved-launch');
