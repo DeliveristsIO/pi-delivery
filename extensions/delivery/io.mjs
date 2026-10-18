@@ -4,6 +4,7 @@ import {homedir} from 'node:os';
 import {execFileSync,spawn} from 'node:child_process';
 import {createHash,randomUUID} from 'node:crypto';
 import {proveNativePrelaunch} from './prelaunch.mjs';
+import {exactModelEvidence} from './policy.mjs';
 export const agentDir=()=>process.env.PI_CODING_AGENT_DIR || join(homedir(),'.pi','agent');
 export const configPath=()=>join(agentDir(),'delivery.json');
 export function jsonFile(path,max=4*1024*1024) {
@@ -253,7 +254,7 @@ export function readOutcome(active) {
     const error=new Error(`Native worker ${active.id} ${status.state}: ${status.error || 'runner did not close successfully'}. Inspect native evidence; no retry launched.`);error.closed=true;error.nativeState=status.state;throw error;
   }
   const step=status.steps?.[0];
-  if(status.steps?.length!==1 || step.agent!==active.agent || step.model!==active.model || !step.attemptedModels?.length || step.attemptedModels.some(model=>model!==active.model))throw new Error('Native worker agent/model evidence missing or differs from exact approved route');
+  if(status.steps?.length!==1 || step.agent!==active.agent || !exactModelEvidence(step,active.model))throw new Error('Native worker agent/model evidence missing or differs from exact approved route');
   try {
     if(typeof step.structuredOutputPath!=='string' || !isAbsolute(step.structuredOutputPath))throw new Error('Native worker missing structured report');
     return jsonFile(step.structuredOutputPath,128000);

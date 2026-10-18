@@ -1,4 +1,4 @@
-// pi-subagents 0.67.0 finalizeProcessTerminal: children execute in the runner;
+// pi-subagents 0.67.0-0.79.1 finalizeProcessTerminal: children execute in the runner;
 // expectedWriters={0:0} legitimately produces a runner-only observed sidecar.
 export function terminalProof(runId='native',patch={}) {
  return {version:1,runId,runnerProcessInstanceId:'runner-instance',state:'observed',observedAt:100,

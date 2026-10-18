@@ -126,3 +126,11 @@ export function snapshotCoverage(snapshot={}) {
   const shown=paths.slice(0,10).map(path=>JSON.stringify(path.length>160?path.slice(0,160)+'…':path));
   return `Opaque nested boundaries (${paths.length}): ${shown.join(', ')}${paths.length>10?`; ${paths.length-10} paths omitted`:''}. Contents are not fingerprinted or reviewed; do not traverse or modify these boundaries. Only directory identity and outer index gitlink revisions are covered. For nested work, run delivery in that repository.`;
 }
+// Exact model evidence for one native step. pi-subagents <=0.67 records attemptedModels (fallback era);
+// 0.68+ removed fallbackModels and same-launch model switching, so a step has exactly one model and the field is
+// absent. Absent is accepted only together with step.model === approved; a present list must be non-empty and exact.
+export function exactModelEvidence(step,model) {
+  if(!step || typeof model!=='string' || !model || step.model!==model)return false;
+  if(step.attemptedModels===undefined)return true;
+  return Array.isArray(step.attemptedModels) && step.attemptedModels.length>0 && step.attemptedModels.every(m=>m===model);
+}

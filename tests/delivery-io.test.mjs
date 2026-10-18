@@ -35,7 +35,11 @@ test('completion requires actual terminal proof, model and structured report',t=
  assert.equal(readOutcome(a).status,'approved');
  assert.throws(()=>readOutcome({...a,model:'other/a'}),/model/);
  const s=JSON.parse(readFileSync(join(d,'status.json')));s.steps[0].attemptedModels=[];
- writeFileSync(join(d,'status.json'),JSON.stringify(s));assert.throws(()=>readOutcome(a),/model/);
+ writeFileSync(join(d,'status.json'),JSON.stringify(s));assert.throws(()=>readOutcome(a),/model/); // pi-subagents 0.68+ (no fallback models): attemptedModels absent, step.model alone is the exact route
+ delete s.steps[0].attemptedModels;writeFileSync(join(d,'status.json'),JSON.stringify(s));assert.equal(readOutcome(a).status,'approved');
+ assert.throws(()=>readOutcome({...a,model:'other/a'}),/model/);
+ s.steps[0].attemptedModels=['custom/a','other/b'];writeFileSync(join(d,'status.json'),JSON.stringify(s));assert.throws(()=>readOutcome(a),/model/);
+ s.steps[0].attemptedModels='custom/a';writeFileSync(join(d,'status.json'),JSON.stringify(s));assert.throws(()=>readOutcome(a),/model/);
 });
 test('RPC correlates replies and times out without installed owner',async()=>{
  const listeners=new Map();

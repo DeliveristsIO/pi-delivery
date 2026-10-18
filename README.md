@@ -31,7 +31,7 @@ bash setup.sh --check   # inspect only
 bash setup.sh
 ```
 
-Bootstrap installs the pinned `pi-subagents@0.67.0`, SPARK, frontend-design and Ollama Cloud packages if missing. The optional design/provider packages are not required by the delivery pipeline. For already installed dependencies, `bash install.sh` only creates no-clobber links into `PI_CODING_AGENT_DIR` or `~/.pi/agent`; `--check` makes no changes. After active workers settle, fully restart Pi. Installation does not publish anything.
+Bootstrap installs the pinned `pi-subagents@0.79.1`, SPARK, frontend-design and Ollama Cloud packages if missing. The optional design/provider packages are not required by the delivery pipeline. For already installed dependencies, `bash install.sh` only creates no-clobber links into `PI_CODING_AGENT_DIR` or `~/.pi/agent`; `--check` makes no changes. After active workers settle, fully restart Pi. Installation does not publish anything.
 
 ## Use
 

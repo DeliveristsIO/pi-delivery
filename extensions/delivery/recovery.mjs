@@ -1,4 +1,4 @@
-import {assertUnchanged,validateReport} from './policy.mjs';
+import {assertUnchanged,validateReport,exactModelEvidence} from './policy.mjs';
 import {snapshotId} from './evidence.mjs';
 import {isAbsolute} from 'node:path';
 
@@ -8,8 +8,7 @@ export function closedReviewerOutputFailure(native,closure) {
   const {status,terminal}=closure || {},step=status?.steps?.[0],diagnostic=step?.effects?.settlementDiagnostic;
   if(!['quality','security'].includes(native?.stage) || native.agent!==({quality:'delivery-reviewer',security:'delivery-security'})[native.stage] ||
     !native.id || status?.runId!==native.id || status.sessionId!==native.nativeSession || status.state!=='failed' ||
-    status.steps?.length!==1 || step.agent!==native.agent || step.model!==native.model ||
-    !step.attemptedModels?.length || step.attemptedModels.some(model=>model!==native.model) ||
+    status.steps?.length!==1 || step.agent!==native.agent || !exactModelEvidence(step,native.model) ||
     !status.error?.startsWith(MISSING_TOOL) || step.error!==status.error ||
     diagnostic?.requiredOutput?.kind!=='structured' || diagnostic.requiredOutput.missing!==true ||
     diagnostic.requiredOutput.path!==step.structuredOutputPath || !isAbsolute(step.structuredOutputPath) ||
@@ -45,7 +44,7 @@ export function assertRecovery(state,{root,session,nativeSession,snapshot,routes
   const failedReviewer=failure.reason==='review_report_invalid' && closure.status.state==='failed';
   if(failedReviewer)closedReviewerOutputFailure(native,closure);
   else if(closure.status.state!=='complete' || closure.terminal.instances.some(i=>i.exitCode!==0 || i.signal))throw new Error('Recovery exact native completion/model evidence invalid');
-  if(closure.status.steps?.length!==1 || step.agent!==native.agent || step.model!==native.model || !step.attemptedModels?.length || step.attemptedModels.some(m=>m!==native.model))throw new Error('Recovery exact native completion/model evidence invalid');
+  if(closure.status.steps?.length!==1 || step.agent!==native.agent || !exactModelEvidence(step,native.model))throw new Error('Recovery exact native completion/model evidence invalid');
   if(!state.leased || !state.lockFence)throw new Error('Recovery retained lease/fence missing');
   inspectLock(root,owner);
   return cp;
