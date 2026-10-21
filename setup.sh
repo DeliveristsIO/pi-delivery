@@ -3,7 +3,7 @@
 # Package installation runs first; linking stays delegated to the offline installer.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_SUBAGENTS_SPEC='npm:pi-subagents@0.79.1'
+PI_SUBAGENTS_SPEC='npm:pi-subagents@0.80.0'
 SPARK_SPEC='npm:@adityaaria/spark'
 FRONTEND_DESIGN_SPEC='npm:@sentiolabs/pi-frontend-design'
 OLLAMA_CLOUD_SPEC='npm:pi-ollama-cloud'
