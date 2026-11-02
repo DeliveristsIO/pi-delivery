@@ -22,11 +22,24 @@ Delivery reads `delivery.json` from `PI_CODING_AGENT_DIR` or `~/.pi/agent`. Exis
 }
 ```
 
-Use real exact IDs from the installed catalog, not these placeholders. Availability is not proof of successful inference. Every native launch specifies its exact model; no silent substitution or fallback. Combined specification/quality review uses `quality`. `spec`, `repos`, old profiles, fallback lists and old correction settings are retained in the file for compatibility but do not operate runtime machinery. Enabling delivery is an explicit session action, never automatic from `repos`.
+Use real exact IDs from the installed catalog, not these placeholders. Availability is not proof of successful inference. Every native launch specifies its exact model; no silent substitution or fallback. Combined specification/quality review uses `quality`. `spec`, `repos`, fallback lists and old correction settings are retained in the file for compatibility but do not operate runtime machinery. Enabling delivery is an explicit session action, never automatic from `repos`.
 
 One timeout setting operates: `"timeouts": { "commandMs": 900000 }` sets the per-command limit for host task/final checks (integer milliseconds, 1000–3600000; default 120000). A check exceeding it is killed with its whole process group and reported as a timeout, never retried. Raise it for suites that genuinely need more than two minutes (full Rails test runs with system tests); it is read from the file at plan display and at each check, and the proposal shows the value in effect as `checksTimeoutMs`. Other keys under `timeouts` are inert.
 
 `delivery_configure` without arguments shows routes and catalog metadata, plus `active` effective planning/coder/quality/security routes, approval mode, commit behavior and command timeout. `inactiveSettings` lists compatibility-only or unknown field paths (including `routes.spec`, `repos` and unused timeout keys), without their stored values. The original `routes` field remains available for compatibility; use `active.routes` for runtime routes. Defaults are autonomous approval, local task commits enabled and a 120000 ms command timeout. Invalid command timeouts produce the same diagnostic as execution; inspection never saves configuration or launches workers. Changes require native confirmation of exact provider/model IDs and are allowed only outside a pending plan or unresolved run. `/delivery setup` is the interactive alternative. Both preserve unrelated configuration fields. While delivery is enabled, both immediately reselect the configured planning model in the parent session; if that selection fails, routes stay saved and the error says to use /model or off/on. Providers receive approved task context and bounded source/diff/check evidence; review data boundaries before approving.
+
+## Route profiles
+
+Switch providers in one step with named profiles: complete sets of exact `planning`/`coder`/`quality`/`security` routes stored under `profiles` in `delivery.json`.
+
+```json
+{"profiles": {"anthropic": {"planning": "anthropic/model-a", "coder": "anthropic/model-b", "quality": "anthropic/model-a", "security": "anthropic/model-a"},
+             "openai": {"planning": "openai/model-c", "coder": "openai/model-d", "quality": "openai/model-c", "security": "openai/model-c"}}}
+```
+
+- `/delivery profile` (interactive) picks a profile; `/delivery profile <name>` switches directly; `/delivery profile list|save <name>|delete <name>` manage them. `/delivery setup` offers to save the chosen routes as a profile.
+- A switch validates every route against the installed catalog, asks for native provider consent, rewrites only `routes`, and reselects the planning model if delivery is on. Allowed only outside a pending plan or unresolved run.
+- A profile is an explicit user choice, not a fallback: no automatic selection, escalation or substitution. `delivery_configure` lists profile names under `active.profiles` and the matching `active.activeProfile`.
 
 ## Read-only issue research
 

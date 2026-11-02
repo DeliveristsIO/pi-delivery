@@ -19,9 +19,9 @@ test('versioned IDs stay intact and labels expose registry data without rankings
 
 test('configuration inspection separates effective defaults from ignored fields without exposing their values',async()=>{
  const {configurationReport}=await import('../extensions/delivery/setup.mjs');
- const report=configurationReport({version:1,routes:{planning:'p/plan',spec:'p/old'},repos:['/private'],profiles:{secret:'private'},timeouts:{coder:42}});
- assert.deepEqual(report.active,{routes:{planning:'p/plan'},approval:'autonomous',commit:true,timeouts:{commandMs:120000}});
- assert.deepEqual(report.inactiveSettings.map(s=>s.path),['routes.spec','repos','profiles','timeouts.coder']);
+ const report=configurationReport({version:1,routes:{planning:'p/plan',spec:'p/old'},repos:['/private'],profiles:{secret:'private'},extra:1,timeouts:{coder:42}});
+ assert.deepEqual(report.active,{routes:{planning:'p/plan'},profiles:[],activeProfile:null,approval:'autonomous',commit:true,timeouts:{commandMs:120000}});
+ assert.deepEqual(report.inactiveSettings.map(s=>s.path),['routes.spec','repos','extra','timeouts.coder']);
  assert.doesNotMatch(JSON.stringify(report),/private|p\/old/);
 });
 test('configuration inspection reflects active settings and rejects invalid command timeouts',async()=>{
@@ -31,4 +31,22 @@ test('configuration inspection reflects active settings and rejects invalid comm
  for(const value of [0,999,3600001,'900000'])assert.throws(()=>configurationReport({routes:{},timeouts:{commandMs:value}}),/commandMs/);
  assert.equal(configurationReport({routes:{},approval:'other',commit:'false'}).active.approval,'autonomous');
  assert.equal(configurationReport({routes:{},commit:'false'}).active.commit,true);
+});
+test('profiles save, list, switch and delete exact route sets',async()=>{
+ const {saveProfile,deleteProfile,profileRoutes,profileNames}=await import('../extensions/delivery/setup.mjs');
+ const routes={planning:'a/p',coder:'a/c',quality:'a/q',security:'a/s',spec:'a/old'};
+ let config=saveProfile({version:1,routes},'alpha',routes);
+ assert.deepEqual(profileNames(config),['alpha']);
+ assert.deepEqual(profileRoutes(config,'alpha'),{planning:'a/p',coder:'a/c',quality:'a/q',security:'a/s'});
+ assert.throws(()=>saveProfile(config,'bad name',routes),/Profile name/);
+ assert.throws(()=>saveProfile(config,'x',{planning:'a/p'}),/not configured/);
+ assert.throws(()=>profileRoutes(config,'nope'),/Unknown profile/);
+ assert.deepEqual(profileNames(deleteProfile(config,'alpha')),[]);
+});
+test('legacy-shaped profiles are ignored and the active profile is detected',async()=>{
+ const {profileNames,activeProfile}=await import('../extensions/delivery/setup.mjs');
+ const r={planning:'a/p',coder:'a/c',quality:'a/q',security:'a/s'};
+ const config={routes:r,profiles:{junk:'x',good:r,other:{...r,coder:'b/c'}}};
+ assert.deepEqual(profileNames(config),['good','other']);
+ assert.equal(activeProfile(config),'good');
 });

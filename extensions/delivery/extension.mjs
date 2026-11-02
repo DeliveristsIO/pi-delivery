@@ -6,7 +6,7 @@ import {randomUUID,createHash} from 'node:crypto';
 import {ROLES,AGENTS,SCHEMAS,REPORT_SCHEMA,VERIFIER_REPORT_SCHEMA,validateBrowser,validate,validatePlan,validateReport,validateRoutes,isApproval,assertUnchanged,assertCoderChanges,assertScope,securitySensitive,snapshotCoverage} from './policy.mjs';
 import * as io from './io.mjs';
 import {rpc} from './rpc.mjs';
-import {modelLabel,ROLE_HELP,commandTimeout,configurationReport} from './setup.mjs';
+import {modelLabel,ROLE_HELP,commandTimeout,configurationReport,profileNames,activeProfile,saveProfile,deleteProfile,profileRoutes} from './setup.mjs';
 import {readIssues} from './issues.mjs';
 
 const ENTRY='delivery-coordinator-v2';
@@ -684,7 +684,7 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
     }]
   ])pi.registerTool({name:`delivery_${name}`,label:`Delivery ${name}`,description,parameters:schemas[name] || schemas.empty || SCHEMAS.empty,async execute(_id,args,_signal,_update,context){ctx=context;validate(SCHEMAS[name] || SCHEMAS.empty,args);const response=await fn(args,_signal);return name==='plan'?launchIfAutonomous(response,execute):name==='recovery_plan'?launchIfAutonomous(response,recoveryExecute):response;}});
 
-  pi.registerCommand('delivery',{description:'Thin SPARK coordination: on, off, status, approve, stop, resume, setup',async handler(args,context){
+  pi.registerCommand('delivery',{description:'Thin SPARK coordination: on, off, status, approve, stop, resume, setup, profile',async handler(args,context){
     ctx=context;const action=args.trim() || 'status';
     if(action==='on')return enable();
     if(action==='status'){display(legacy?'Unsupported legacy journal preserved. Inspect native workers before starting a new session.':evidenceText());return;}
@@ -694,13 +694,36 @@ export function registerDelivery(pi,schemas=SCHEMAS,overrides={}) {
       if(!ctx.hasUI)throw new Error('Setup requires interactive/RPC UI. Configure exact routes interactively.');
       const current=config(),routes={...current.routes},models=available();
       for(const role of ROLES){const selected=await ctx.ui.select(`${role}: ${ROLE_HELP[role]}`,models.map(modelLabel));if(!selected)return;routes[role]=id(models[models.map(modelLabel).indexOf(selected)]);}
-      if(await ctx.ui.confirm('Delivery provider consent',`Approved context will be sent to these providers.\n${JSON.stringify(routes)}`)) {d.saveConfig(d.configPath(),{...current,routes});await applyPlanningRoute(routes);}return;
+      if(await ctx.ui.confirm('Delivery provider consent',`Approved context will be sent to these providers.\n${JSON.stringify(routes)}`)) {
+        let next={...current,routes};
+        const name=ctx.ui.input?(await ctx.ui.input('Save these routes as a profile (name, empty to skip)',''))?.trim():'';
+        if(name)next=saveProfile(next,name,routes);
+        d.saveConfig(d.configPath(),next);await applyPlanningRoute(routes);
+      }return;
+    }
+    if(action==='profile' || action.startsWith('profile ')) {
+      if(legacy || preparing || job || state.active || state.pendingCheck || !['planning','complete','stopped'].includes(state.stage))throw new Error('Inspect retained native ownership/proposal before switching profiles');
+      const current=config(),words=action.split(/\s+/).slice(1),names=profileNames(current);
+      const [sub,arg]=words;
+      if(sub==='list' || (!words.length && !ctx.hasUI)){display(`Profiles: ${names.map(n=>n===activeProfile(current)?`${n} (active)`:n).join(', ')||'none'}\nActive routes: ${JSON.stringify(current.routes)}\nUse /delivery profile <name> | save <name> | delete <name>`);return;}
+      if(sub==='save'){d.saveConfig(d.configPath(),saveProfile(current,arg,current.routes));display(`Profile "${arg}" saved from current routes.`);return;}
+      if(sub==='delete'){d.saveConfig(d.configPath(),deleteProfile(current,arg));display(`Profile "${arg}" deleted.`);return;}
+      let name=sub;
+      if(!name){
+        const labels=names.map(n=>`${n}${n===activeProfile(current)?' (active)':''}: ${Object.entries(profileRoutes(current,n)).map(([role,route])=>`${role}=${route}`).join(' ')}`);
+        if(!labels.length)throw new Error('No profiles yet. Run /delivery setup, or /delivery profile save <name>.');
+        const selected=await ctx.ui.select('Switch delivery profile',labels);if(!selected)return;name=names[labels.indexOf(selected)];
+      }
+      const routes=profileRoutes(current,name);
+      validateRoutes(routes,available().map(id),ROLES);
+      if(!ctx.hasUI || !await ctx.ui.confirm('Delivery provider consent',`Switch to profile "${name}"? Approved context will be sent to these exact provider/models.\n${JSON.stringify(routes)}`))throw new Error('Profile switch requires native confirmation.');
+      d.saveConfig(d.configPath(),{...current,routes:{...current.routes,...routes}});await applyPlanningRoute(routes);display(`Switched to profile "${name}".`);return;
     }
     guard();
     if(action==='approve'){approval=true;return state.stage==='awaiting-recovery-approval'?recoveryExecute():execute();}
     if(action==='stop')return stop();
     if(action==='resume')return resume();
-    throw new Error('Use /delivery on|off|status|approve|stop|resume|setup');
+    throw new Error('Use /delivery on|off|status|approve|stop|resume|setup|profile');
   }});
   pi.on('input',async event=>{
     approval=Boolean(['awaiting-approval','awaiting-recovery-approval'].includes(state.stage) && ['interactive','rpc'].includes(event.source) && isApproval(event.text));

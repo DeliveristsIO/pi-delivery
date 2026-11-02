@@ -31,15 +31,56 @@ export function configurationReport(config) {
   const inactiveSettings=[];
   const ignored=path=>inactiveSettings.push({path,reason:'Retained in configuration; not used by the coordinator.'});
   for(const role of Object.keys(config.routes || {}))if(!roles.includes(role))ignored(`routes.${role}`);
-  for(const key of Object.keys(config))if(!['version','routes','approval','commit','timeouts'].includes(key))ignored(key);
+  for(const key of Object.keys(config))if(!['version','routes','approval','commit','timeouts','profiles'].includes(key))ignored(key);
   for(const key of Object.keys(config.timeouts || {}))if(key!=='commandMs')ignored(`timeouts.${key}`);
   return {
     active:{
       routes:Object.fromEntries(roles.filter(role=>config.routes?.[role]!==undefined).map(role=>[role,config.routes[role]])),
+      profiles:profileNames(config),
+      activeProfile:activeProfile(config),
       approval:config.approval==='manual'?'manual':'autonomous',
       commit:config.commit!==false,
       timeouts:{commandMs:commandTimeout(config)},
     },
     inactiveSettings,
   };
+}
+
+// Profiles: named, explicit sets of exact provider/model routes the user switches between.
+// Switching only rewrites `routes`; no fallback, escalation or automatic selection.
+const PROFILE_NAME=/^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
+const PROFILE_ROLES=['planning','coder','quality','security'];
+export function profileNames(config) {
+  const profiles=config.profiles;
+  return profiles && typeof profiles==='object' && !Array.isArray(profiles) ? Object.keys(profiles).filter(name=>PROFILE_NAME.test(name) && PROFILE_ROLES.every(role=>typeof profiles[name]?.[role]==='string' && profiles[name][role])) : [];
+}
+export function checkProfileName(name) {
+  if(typeof name!=='string' || !PROFILE_NAME.test(name) || name==='__proto__')throw new Error('Profile name must be 1-40 characters: letters, digits, dot, underscore or dash.');
+  return name;
+}
+export function saveProfile(config,name,routes) {
+  checkProfileName(name);
+  const saved={};
+  for(const role of PROFILE_ROLES){
+    if(typeof routes?.[role]!=='string' || !routes[role])throw new Error(`Cannot save profile: route "${role}" is not configured.`);
+    saved[role]=routes[role];
+  }
+  return {...config,profiles:{...(config.profiles||{}),[name]:saved}};
+}
+export function deleteProfile(config,name) {
+  if(!profileNames(config).includes(name))throw new Error(`Unknown profile "${name}".`);
+  const {[name]:_removed,...rest}=config.profiles;
+  return {...config,profiles:rest};
+}
+export function profileRoutes(config,name) {
+  if(!profileNames(config).includes(name))throw new Error(`Unknown profile "${name}". Known: ${profileNames(config).join(', ')||'none'}.`);
+  const profile=config.profiles[name];
+  return Object.fromEntries(PROFILE_ROLES.map(role=>{
+    if(typeof profile?.[role]!=='string' || !profile[role])throw new Error(`Profile "${name}" lacks route "${role}".`);
+    return [role,profile[role]];
+  }));
+}
+// Name of the profile whose routes equal the current routes, if any.
+export function activeProfile(config) {
+  return profileNames(config).find(name=>PROFILE_ROLES.every(role=>config.profiles[name][role]===config.routes?.[role]))||null;
 }
